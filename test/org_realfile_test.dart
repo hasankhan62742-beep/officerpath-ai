@@ -5,15 +5,19 @@ import 'package:officerpath_ai/services/book_structure.dart';
 import 'package:officerpath_ai/services/mcq_parser.dart';
 import 'package:officerpath_ai/services/pdf_text_extractor.dart';
 
+import 'test_helpers.dart';
+
 /// Organisation file (real file, v1.2): an infographic fact-card
 /// book — 50 pages, 180 label:value facts, ZERO MCQs (generation
 /// only). Converted from tmp_org_probe_test.dart (deleted). The
 /// numbers below are the v1.2 run's measured values.
 void main() {
   test('organisation file: 180 facts, 0 MCQs, noise filtered', () async {
-    final bytes = await File(
+    final file = File(
       '/home/hatch/workspace/user/files/organization_Sir_Waleed_0300_1111938.pdf',
-    ).readAsBytes();
+    );
+    if (skipIfFixtureMissing(file.path)) return;
+    final bytes = await file.readAsBytes();
     final pages = extractPdfPages(bytes);
     final totalChars = pages.fold<int>(0, (a, p) => a + p.text.length);
     expect(pages.length, 50);

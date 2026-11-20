@@ -5,6 +5,8 @@ import 'package:officerpath_ai/services/book_structure.dart';
 import 'package:officerpath_ai/services/mcq_parser.dart';
 import 'package:officerpath_ai/services/pdf_text_extractor.dart';
 
+import 'test_helpers.dart';
+
 /// Phase A gap regressions (19 Nov 2026). Each test pins one W4 gap
 /// fix in lib/services/mcq_parser.dart; a revert must turn its test
 /// red, never silently re-open the gap.
@@ -117,9 +119,11 @@ void main() {
   group('G2 table answer-source labelling', () {
     test('F3 Pak Affairs: 19 table rows count as bold, not key',
         () async {
-      final bytes = await File(
+      final file = File(
         '/home/hatch/workspace/user/files/Pak_Affairs_by_CSPs.pdf',
-      ).readAsBytes();
+      );
+      if (skipIfFixtureMissing(file.path)) return;
+      final bytes = await file.readAsBytes();
       final maps = processPdfInBackground({
         'bytes': bytes,
         'sourceId': 'real-f3',

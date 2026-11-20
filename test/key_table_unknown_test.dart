@@ -6,6 +6,8 @@ import 'package:officerpath_ai/services/book_structure.dart';
 import 'package:officerpath_ai/services/mcq_parser.dart';
 import 'package:officerpath_ai/services/pdf_text_extractor.dart';
 
+import 'test_helpers.dart';
+
 /// MPT answer-key table: multi-column "N. L" layout + "?" for unknown
 /// answers. Converted from tmp_key_probe_test.dart + the MPT spot
 /// checks in tmp_probe_new_test.dart (both deleted).
@@ -37,9 +39,11 @@ void main() {
   });
 
   test('MPT real file: 142 parsed, "?" questions excluded, Q1 keyed', () async {
-    final bytes = await File(
+    final file = File(
       '/home/hatch/workspace/user/files/MPT-CSS-2027-Solved.pdf',
-    ).readAsBytes();
+    );
+    if (skipIfFixtureMissing(file.path)) return;
+    final bytes = await file.readAsBytes();
     final maps = processPdfInBackground({
       'bytes': bytes,
       'sourceId': 'mpt-key',

@@ -61,6 +61,7 @@ void main() {
           'sample PDF not present — download from the URL in '
           'test/regression/README.md',
         );
+        return;
       }
       final maps = processPdfInBackground({
         'bytes': file.readAsBytesSync(),
@@ -99,6 +100,7 @@ void main() {
           'sample PDF not present — download from the URL in '
           'test/regression/README.md',
         );
+        return;
       }
       final maps = processPdfInBackground({
         'bytes': file.readAsBytesSync(),

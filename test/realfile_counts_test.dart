@@ -5,6 +5,8 @@ import 'package:officerpath_ai/services/book_structure.dart';
 import 'package:officerpath_ai/services/mcq_parser.dart';
 import 'package:officerpath_ai/services/pdf_text_extractor.dart';
 
+import 'test_helpers.dart';
+
 /// Per-file parsed counts for the two prose/flashcard books that
 /// realfile_v12_test.dart does not count exactly. Converted from
 /// tmp_verify_all_test.dart (deleted). F3 numbers are the v1.3
@@ -13,9 +15,11 @@ import 'package:officerpath_ai/services/pdf_text_extractor.dart';
 void main() {
   test('F3 Pak Affairs prose: 181 MCQs (162 flashcard + 19 table)',
       () async {
-    final bytes = await File(
+    final file = File(
       '/home/hatch/workspace/user/files/Pak_Affairs_by_CSPs.pdf',
-    ).readAsBytes();
+    );
+    if (skipIfFixtureMissing(file.path)) return;
+    final bytes = await file.readAsBytes();
     final pages = extractPdfPages(bytes);
     final r = parseMcqsFromPages(
       [for (final p in pages) PageText(p.page, p.text)],
@@ -30,9 +34,11 @@ void main() {
   });
 
   test('F8 Sir Tauqeer flashcard book: 284 MCQs, 9 month parts', () async {
-    final bytes = await File(
+    final file = File(
       '/home/hatch/workspace/user/files/Current_Affairs_Year_2026_Complete__October-January__Sir_Tauqeer_0_sw7h.pdf',
-    ).readAsBytes();
+    );
+    if (skipIfFixtureMissing(file.path)) return;
+    final bytes = await file.readAsBytes();
     final pages = extractPdfPages(bytes);
     final r = parseMcqsFromPages(
       [for (final p in pages) PageText(p.page, p.text)],

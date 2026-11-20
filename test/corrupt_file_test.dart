@@ -4,6 +4,8 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:officerpath_ai/services/pdf_text_extractor.dart';
 
+import 'test_helpers.dart';
+
 /// v1.2 corrupt-file fail-fast (File 4, Ayesha Jalal — 4.5 MB).
 /// The file's xref stream fails to decompress, which is exactly what
 /// `pdftotext` reports ("Couldn't find trailer dictionary /
@@ -14,6 +16,7 @@ void main() {
       '/home/hatch/workspace/user/files/Ayesha_Jalal_-_The_Struggle_for_Pakistan__A_Muslim_Homeland_and_Global_Politics__2014__Belknap_Press.pdf';
 
   test('detectPdfCorruption flags the corrupt file', () async {
+    if (skipIfFixtureMissing(ayesha)) return;
     final bytes = await File(ayesha).readAsBytes();
     final reason = detectPdfCorruption(bytes);
     // ignore: avoid_print
@@ -23,6 +26,7 @@ void main() {
   });
 
   test('processPdfInBackground fails fast with a timeout', () async {
+    if (skipIfFixtureMissing(ayesha)) return;
     final bytes = await File(ayesha).readAsBytes();
     final stopwatch = Stopwatch()..start();
     Object? caught;
@@ -57,9 +61,11 @@ void main() {
       'Pak_Affairs_by_CSPs.pdf',
     ];
     for (final name in valid) {
-      final bytes = await File(
+      final file = File(
         '/home/hatch/workspace/user/files/$name',
-      ).readAsBytes();
+      );
+      if (skipIfFixtureMissing(file.path)) return;
+      final bytes = await file.readAsBytes();
       expect(
         detectPdfCorruption(bytes),
         isNull,

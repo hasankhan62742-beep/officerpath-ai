@@ -4,13 +4,17 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:officerpath_ai/services/mcq_parser.dart';
 import 'package:officerpath_ai/services/pdf_text_extractor.dart';
 
+import 'test_helpers.dart';
+
 /// TEMPORARY diagnosis on the Pace GK Academy book (two-column layout).
 /// To be converted into permanent tests by the v1.2 agents.
 void main() {
   test('REAL FILE 6: Pace Jan-Nov 2026 — two-column + keys', () async {
-    final bytes = await File(
+    final file = File(
       '/home/hatch/workspace/user/files/Current_Affairs_Jan-Nov_2026_by_Pace_GK_Academy.pdf',
-    ).readAsBytes();
+    );
+    if (skipIfFixtureMissing(file.path)) return;
+    final bytes = await file.readAsBytes();
     final sw = Stopwatch()..start();
     final pages = extractPdfPages(bytes);
     final extractMs = sw.elapsedMilliseconds;

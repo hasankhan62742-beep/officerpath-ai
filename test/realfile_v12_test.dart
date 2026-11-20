@@ -6,15 +6,19 @@ import 'package:officerpath_ai/services/book_structure.dart';
 import 'package:officerpath_ai/services/mcq_parser.dart';
 import 'package:officerpath_ai/services/pdf_text_extractor.dart';
 
+import 'test_helpers.dart';
+
 /// v1.2 real-file regression (agent C): the same files agent A
 /// verified, plus the new v1.2 behaviours (corrupt fail-fast,
 /// answer-pending for inference, MPT pattern suggestion).
 void main() {
   test('F1 PPSC 40 MCQs: 40/40 through the full isolate entry point',
       () async {
-    final bytes = await File(
+    final file = File(
       '/home/hatch/workspace/user/files/PPSC_Current_Affairs_40_MCQs.pdf',
-    ).readAsBytes();
+    );
+    if (skipIfFixtureMissing(file.path)) return;
+    final bytes = await file.readAsBytes();
     expect(detectPdfCorruption(bytes), isNull);
     final maps = processPdfInBackground({
       'bytes': bytes,
@@ -30,9 +34,11 @@ void main() {
 
   test('F2 June 2025: 0 parsed, answer-pending questions exposed for AI',
       () async {
-    final bytes = await File(
+    final file = File(
       '/home/hatch/workspace/user/files/Current-Affairs-June-2025-in-PDF__1.pdf',
-    ).readAsBytes();
+    );
+    if (skipIfFixtureMissing(file.path)) return;
+    final bytes = await file.readAsBytes();
     expect(detectPdfCorruption(bytes), isNull);
     final pages = extractPdfPages(bytes);
     final result = parseMcqsFromPages(
@@ -52,9 +58,11 @@ void main() {
   });
 
   test('Pace 184pp: parses, corrupt gate passes', () async {
-    final bytes = await File(
+    final file = File(
       '/home/hatch/workspace/user/files/Current_Affairs_Jan-Nov_2026_by_Pace_GK_Academy.pdf',
-    ).readAsBytes();
+    );
+    if (skipIfFixtureMissing(file.path)) return;
+    final bytes = await file.readAsBytes();
     expect(detectPdfCorruption(bytes), isNull);
     final maps = processPdfInBackground({
       'bytes': bytes,
@@ -68,9 +76,11 @@ void main() {
 
   test('Admission letter: 0 MCQs, no crash, corrupt gate passes',
       () async {
-    final bytes = await File(
+    final file = File(
       '/home/hatch/workspace/user/files/junior_clerk.pdf',
-    ).readAsBytes();
+    );
+    if (skipIfFixtureMissing(file.path)) return;
+    final bytes = await file.readAsBytes();
     expect(detectPdfCorruption(bytes), isNull);
     final maps = processPdfInBackground({
       'bytes': bytes,
@@ -102,9 +112,11 @@ void main() {
       ExamPattern.suggestForTitle('CSS Preliminary Test 2027')?.id,
       'css_mpt',
     );
-    final bytes = await File(
+    final file = File(
       '/home/hatch/workspace/user/files/MPT-CSS-2027-Solved.pdf',
-    ).readAsBytes();
+    );
+    if (skipIfFixtureMissing(file.path)) return;
+    final bytes = await file.readAsBytes();
     expect(detectPdfCorruption(bytes), isNull);
     final maps = processPdfInBackground({
       'bytes': bytes,

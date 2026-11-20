@@ -4,6 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:officerpath_ai/services/mcq_parser.dart';
 import 'package:officerpath_ai/services/pdf_text_extractor.dart';
 
+import 'test_helpers.dart';
+
 /// Worker 4 — Requirement B (every character): the parser/extractor
 /// must handle Urdu script (RTL, Nastaliq ligatures), Arabic,
 /// English, digits, math symbols (× ÷ √ ±), special characters,
@@ -78,9 +80,11 @@ Answer: B
 
     test('PDF text layer: Pace book has no ligatures after extraction',
         () async {
-      final bytes = await File(
+      final file = File(
         '/home/hatch/workspace/user/files/Current_Affairs_Jan-Nov_2026_by_Pace_GK_Academy.pdf',
-      ).readAsBytes();
+      );
+      if (skipIfFixtureMissing(file.path)) return;
+      final bytes = await file.readAsBytes();
       final text = extractTextFromPdfBytes(bytes);
       expect(text, contains('officially'));
       expect(text, contains('Affairs'));

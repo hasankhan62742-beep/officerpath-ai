@@ -4,6 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:officerpath_ai/services/mcq_parser.dart';
 import 'package:officerpath_ai/services/pdf_text_extractor.dart';
 
+import 'test_helpers.dart';
+
 /// TEMPORARY negative test on the user's admission letter.
 /// PRIVACY: this test prints ONLY counts and timings — NEVER the
 /// extracted text (the file contains the user's CNIC/roll number).
@@ -11,9 +13,11 @@ import 'package:officerpath_ai/services/pdf_text_extractor.dart';
 void main() {
   test('NEGATIVE: admission letter must yield 0 MCQs, fast, no crash',
       () async {
-    final bytes = await File(
+    final file = File(
       '/home/hatch/workspace/user/files/junior_clerk.pdf',
-    ).readAsBytes();
+    );
+    if (skipIfFixtureMissing(file.path)) return;
+    final bytes = await file.readAsBytes();
     final sw = Stopwatch()..start();
     final pages = extractPdfPages(bytes);
     final text = pages.map((p) => p.text).join('\n\n');

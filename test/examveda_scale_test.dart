@@ -5,6 +5,8 @@ import 'package:officerpath_ai/services/book_structure.dart';
 import 'package:officerpath_ai/services/mcq_parser.dart';
 import 'package:officerpath_ai/services/pdf_text_extractor.dart';
 
+import 'test_helpers.dart';
+
 /// Examveda scale test (real file, v1.2): 546 pages / 1.03M chars.
 /// Converted from tmp_probe_exam_test.dart (deleted). The numbers
 /// below are the v1.3 run's measured values (parser md5 0edc9e9b…,
@@ -15,6 +17,7 @@ void main() {
     final file = File(
       '/home/hatch/workspace/user/files/Examveda_GK_Comp_Eng_Sir_Waleed_0300_1111938.pdf',
     );
+    if (skipIfFixtureMissing(file.path)) return;
     final bytes = await file.readAsBytes();
     final t0 = DateTime.now();
     final pages = extractPdfPages(bytes);

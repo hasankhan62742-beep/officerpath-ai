@@ -208,13 +208,27 @@ void main() {
       }
     });
 
-    test('placeholder google-services.json has no real values', () {
-      final placeholder = _read('android/app/google-services.json');
-      expect(placeholder, contains('REPLACE-ME'));
+    test('shipped google-services.json is the real client config, '
+        'no secrets', () {
+      // The real Firebase client config is intentionally shipped:
+      // the CI build needs it for the google-services Gradle plugin,
+      // and it holds no secrets — it is client config only (project
+      // id, package name, client API key). It must never contain a
+      // service_role key or a legacy FCM server key.
+      const configPath = 'android/app/google-services.json';
+      expect(File(configPath).existsSync(), isTrue);
+      final config = _read(configPath);
+      expect(config, contains('"project_id": "n8n-automation-483009"'));
       expect(
-        placeholder,
-        isNot(contains(RegExp(r'"project_id":\s*"[a-z0-9\-]+"'))),
-        reason: 'placeholder must not carry a real project id',
+        config,
+        contains('"package_name": "com.qadeerautomations.officerpath"'),
+      );
+      expect(config, isNot(contains('service_role')));
+      expect(
+        RegExp(r'AAAA[A-Za-z0-9_\-]{20,}').hasMatch(config),
+        isFalse,
+        reason: 'google-services.json must not contain a legacy '
+            'FCM server key',
       );
     });
 

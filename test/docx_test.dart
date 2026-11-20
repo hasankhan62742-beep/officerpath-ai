@@ -69,7 +69,7 @@ void main() {
   group('DOCX — sample fixture (Scribd shapes)', () {
     test('sample_mcq_bank.docx parses 6/6 with correct answers', () async {
       final bytes = await File(
-        '/home/hatch/workspace/officerpath-ai/test/fixtures/sample_mcq_bank.docx',
+        'test/fixtures/sample_mcq_bank.docx',
       ).readAsBytes();
       final pages = extractDocxPages(bytes);
       expect(pages.length, 1);
@@ -113,7 +113,7 @@ void main() {
 
     test('importDocx end-to-end returns a PdfImportResult', () async {
       final bytes = await File(
-        '/home/hatch/workspace/officerpath-ai/test/fixtures/sample_mcq_bank.docx',
+        'test/fixtures/sample_mcq_bank.docx',
       ).readAsBytes();
       final result = await PdfImportService.importDocx(
         bytes,

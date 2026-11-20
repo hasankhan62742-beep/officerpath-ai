@@ -11,6 +11,8 @@ import 'package:officerpath_ai/services/mcq_parser.dart';
 import 'package:officerpath_ai/services/pdf_import_service.dart';
 import 'package:officerpath_ai/services/pdf_text_extractor.dart';
 
+import 'test_helpers.dart';
+
 /// Worker 4 — universal format acceptance (v2 Rule 1: "dunia mein
 /// jitni tarah ke bhi format hain, app unko accept kare").
 ///
@@ -546,9 +548,11 @@ Answer: B
 
   group('real files — documented counts (AUDIT_REPORT.md)', () {
     test('F1 PPSC 40 MCQs: 40/40', () async {
-      final bytes = await File(
+      final file = File(
         '/home/hatch/workspace/user/files/PPSC_Current_Affairs_40_MCQs.pdf',
-      ).readAsBytes();
+      );
+      if (skipIfFixtureMissing(file.path)) return;
+      final bytes = await file.readAsBytes();
       final maps = processPdfInBackground({
         'bytes': bytes,
         'sourceId': 'real-f1',
@@ -560,9 +564,11 @@ Answer: B
 
     test('F2 June 2025: 0 parsed, 25 answer-pending for AI inference',
         () async {
-      final bytes = await File(
+      final file = File(
         '/home/hatch/workspace/user/files/Current-Affairs-June-2025-in-PDF__1.pdf',
-      ).readAsBytes();
+      );
+      if (skipIfFixtureMissing(file.path)) return;
+      final bytes = await file.readAsBytes();
       final maps = processPdfInBackground({
         'bytes': bytes,
         'sourceId': 'real-f2',
@@ -574,9 +580,11 @@ Answer: B
 
     test('F3 Pak Affairs prose: 181 MCQs (162 flashcard + 19 table)',
         () async {
-      final bytes = await File(
+      final file = File(
         '/home/hatch/workspace/user/files/Pak_Affairs_by_CSPs.pdf',
-      ).readAsBytes();
+      );
+      if (skipIfFixtureMissing(file.path)) return;
+      final bytes = await file.readAsBytes();
       final maps = processPdfInBackground({
         'bytes': bytes,
         'sourceId': 'real-f3',
@@ -590,9 +598,11 @@ Answer: B
     });
 
     test('F6 Pace two-column: 1442 parsed', () async {
-      final bytes = await File(
+      final file = File(
         '/home/hatch/workspace/user/files/Current_Affairs_Jan-Nov_2026_by_Pace_GK_Academy.pdf',
-      ).readAsBytes();
+      );
+      if (skipIfFixtureMissing(file.path)) return;
+      final bytes = await file.readAsBytes();
       final maps = processPdfInBackground({
         'bytes': bytes,
         'sourceId': 'real-f6',
@@ -612,9 +622,11 @@ Answer: B
 
     test('F8 Sir Tauqeer flashcard book: 284 MCQs, 9 month parts',
         () async {
-      final bytes = await File(
+      final file = File(
         '/home/hatch/workspace/user/files/Current_Affairs_Year_2026_Complete__October-January__Sir_Tauqeer_0_sw7h.pdf',
-      ).readAsBytes();
+      );
+      if (skipIfFixtureMissing(file.path)) return;
+      final bytes = await file.readAsBytes();
       final maps = processPdfInBackground({
         'bytes': bytes,
         'sourceId': 'real-f8',
@@ -627,9 +639,11 @@ Answer: B
     });
 
     test('MPT: 142 parsed, "?" questions excluded', () async {
-      final bytes = await File(
+      final file = File(
         '/home/hatch/workspace/user/files/MPT-CSS-2027-Solved.pdf',
-      ).readAsBytes();
+      );
+      if (skipIfFixtureMissing(file.path)) return;
+      final bytes = await file.readAsBytes();
       final maps = processPdfInBackground({
         'bytes': bytes,
         'sourceId': 'real-mpt',
@@ -652,9 +666,11 @@ Answer: B
 
     test('US History: 515 parsed (q-only flashcard, year parts)',
         () async {
-      final bytes = await File(
+      final file = File(
         '/home/hatch/workspace/user/files/US_History_solved_MCQs_by_SAK.pdf',
-      ).readAsBytes();
+      );
+      if (skipIfFixtureMissing(file.path)) return;
+      final bytes = await file.readAsBytes();
       final maps = processPdfInBackground({
         'bytes': bytes,
         'sourceId': 'real-us',
@@ -666,9 +682,11 @@ Answer: B
 
     test('Sir Rizwan GSA: 467 parsed (q-only 465 + one-liner 2)',
         () async {
-      final bytes = await File(
+      final file = File(
         '/home/hatch/workspace/user/files/Sir_Rizwan_GSA.pdf',
-      ).readAsBytes();
+      );
+      if (skipIfFixtureMissing(file.path)) return;
+      final bytes = await file.readAsBytes();
       final maps = processPdfInBackground({
         'bytes': bytes,
         'sourceId': 'real-riz',
@@ -687,9 +705,11 @@ Answer: B
     });
 
     test('Examveda 546pp: 3202 parsed, 1689 skipped', () async {
-      final bytes = await File(
+      final file = File(
         '/home/hatch/workspace/user/files/Examveda_GK_Comp_Eng_Sir_Waleed_0300_1111938.pdf',
-      ).readAsBytes();
+      );
+      if (skipIfFixtureMissing(file.path)) return;
+      final bytes = await file.readAsBytes();
       final maps = processPdfInBackground({
         'bytes': bytes,
         'sourceId': 'real-exam',
@@ -715,9 +735,11 @@ Answer: B
 
     test('organisation file: 0 MCQs, 180 facts (generation-only)',
         () async {
-      final bytes = await File(
+      final file = File(
         '/home/hatch/workspace/user/files/organization_Sir_Waleed_0300_1111938.pdf',
-      ).readAsBytes();
+      );
+      if (skipIfFixtureMissing(file.path)) return;
+      final bytes = await file.readAsBytes();
       final maps = processPdfInBackground({
         'bytes': bytes,
         'sourceId': 'real-org',
@@ -729,9 +751,11 @@ Answer: B
 
     test('junior_clerk admission letter: 0 MCQs, 1 answer-pending',
         () async {
-      final bytes = await File(
+      final file = File(
         '/home/hatch/workspace/user/files/junior_clerk.pdf',
-      ).readAsBytes();
+      );
+      if (skipIfFixtureMissing(file.path)) return;
+      final bytes = await file.readAsBytes();
       final maps = processPdfInBackground({
         'bytes': bytes,
         'sourceId': 'real-letter',
@@ -742,9 +766,11 @@ Answer: B
     });
 
     test('Ayesha Jalal: corrupt — fail fast, never parsed', () async {
-      final bytes = await File(
+      final file = File(
         '/home/hatch/workspace/user/files/Ayesha_Jalal_-_The_Struggle_for_Pakistan__A_Muslim_Homeland_and_Global_Politics__2014__Belknap_Press.pdf',
-      ).readAsBytes();
+      );
+      if (skipIfFixtureMissing(file.path)) return;
+      final bytes = await file.readAsBytes();
       expect(detectPdfCorruption(bytes), isNotNull);
       expect(
         () => processPdfInBackground({
@@ -763,9 +789,11 @@ Answer: B
         '109_edition_by_abbaSi.pdf',
         'PPSC_110_Edition__1_p7sh.pdf',
       ]) {
-        final bytes = await File(
+        final file = File(
           '/home/hatch/workspace/user/files/$name',
-        ).readAsBytes();
+        );
+        if (skipIfFixtureMissing(file.path)) return;
+        final bytes = await file.readAsBytes();
         expect(detectPdfCorruption(bytes), isNull);
         final maps = processPdfInBackground({
           'bytes': bytes,
@@ -779,9 +807,11 @@ Answer: B
 
     test('IDIOMS glossary: parses without crashing (count recorded)',
         () async {
-      final bytes = await File(
+      final file = File(
         '/home/hatch/workspace/user/files/IDIOMS_COMPILED_BY_Raj_Roy_Soni.pdf',
-      ).readAsBytes();
+      );
+      if (skipIfFixtureMissing(file.path)) return;
+      final bytes = await file.readAsBytes();
       final maps = processPdfInBackground({
         'bytes': bytes,
         'sourceId': 'real-idioms',
