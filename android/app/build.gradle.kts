@@ -26,7 +26,11 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
         // ota_update (v1.3) needs Java 8+ APIs — enable desugaring.
-        coreLibraryDesugaringEnabled = true
+        // NOTE: Kotlin DSL maps the Java setter to
+        // isCoreLibraryDesugaringEnabled; the Groovy-style
+        // coreLibraryDesugaringEnabled does NOT resolve in .kts and
+        // broke the CI build (29 Nov 2026: "Unresolved reference").
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
