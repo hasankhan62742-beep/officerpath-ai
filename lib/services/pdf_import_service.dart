@@ -9,6 +9,7 @@ import '../models/question.dart';
 import 'ai_generation.dart';
 import 'book_structure.dart';
 import 'docx_text_extractor.dart';
+import 'gemini_config.dart';
 import 'image_preprocess.dart';
 import 'mcq_parser.dart';
 import 'pdf_text_extractor.dart';
@@ -61,6 +62,9 @@ class PdfImportResult {
     this.keyPaperReport = const [],
     this.ocrMethods = const {},
     this.poorOcrPages = const [],
+    this.geminiRequested = false,
+    this.geminiPages = 0,
+    this.geminiFailure,
   });
 
   /// All extracted text (text layer + OCR), in page order.
@@ -165,6 +169,29 @@ class PdfImportResult {
   /// re-scan / Gemini best-quality instead of storing garbage.
   final List<int> poorOcrPages;
 
+  /// Gemini "best quality" was requested for this import (the user
+  /// ticked the checkbox). Recorded so the preview can say, honestly,
+  /// whether Gemini actually ran — see [geminiPages] /
+  /// [geminiFailure]. False when the user did not tick best quality
+  /// (Gemini was never attempted) or the source has no OCR pages.
+  final bool geminiRequested;
+
+  /// OCR'd pages Gemini vision actually read (method "Gemini").
+  /// When [geminiRequested] is true and this is 0, Gemini ran on
+  /// NO page — the result is entirely on-device OCR and the preview
+  /// must say so with the reason ([geminiFailure]), never present
+  /// the ML Kit result as a Gemini result.
+  final int geminiPages;
+
+  /// Why Gemini did not run on some page (first failure across the
+  /// import), when it was requested. Null when Gemini was not
+  /// requested, or when it ran without failing. The kind carries the
+  /// concrete next step (noKey → enter the key in Settings;
+  /// noInternet → check the connection; quota → free limit
+  /// reached). When [geminiPages] is 0 the failure is total; when
+  /// it is between 1 and [ocrPages].length - 1 the run was partial.
+  final GeminiFailureKind? geminiFailure;
+
   /// First ~600 characters of the extracted text, for the "no MCQs
   /// found" dialog so the user can see what was actually read.
   String get textPreview =>
@@ -259,6 +286,12 @@ class PdfImportService {
     final ocrMethods = <int, String>{};
     final poorOcrPages = <int>[];
     var ocrCapped = false;
+    // Gemini honesty (20 Nov 2026): a best-quality failure used to
+    // be swallowed silently and the ML Kit text presented as the
+    // result. Record the first failure + how many pages Gemini
+    // actually read, so the preview can say so plainly.
+    GeminiFailureKind? geminiFailureKind;
+    var geminiPages = 0;
 
     // Two-tier OCR for one rendered page (see urdu_ocr.dart):
     // ML Kit first (Latin); Tesseract eng+urd when the page has Urdu
@@ -300,9 +333,18 @@ class PdfImportService {
           if (vision.text.trim().isNotEmpty) {
             text = vision.text;
             method = OcrMethod.gemini;
+            geminiPages++;
           }
+        } on GeminiException catch (e) {
+          // No key / no internet / quota / bad key — keep the
+          // on-device text, but RECORD the failure (first one wins)
+          // so the preview can tell the user Gemini did not run and
+          // why. Never silently present ML Kit text as Gemini's.
+          geminiFailureKind ??= e.kind;
         } catch (_) {
-          // No key / no internet — keep the on-device text.
+          // Any other vision failure — same honest treatment, kind
+          // unknown (the on-device text still stands).
+          geminiFailureKind ??= GeminiFailureKind.unknown;
         }
       }
       return (text, method.label);
@@ -436,6 +478,9 @@ class PdfImportService {
         maps: reparsed,
         ocrMethods: ocrMethods,
         poorOcrPages: poorOcrPages,
+        geminiRequested: bestQualityOcr,
+        geminiPages: geminiPages,
+        geminiFailure: geminiFailureKind,
       );
     }
 
@@ -448,6 +493,9 @@ class PdfImportService {
       maps: bg,
       ocrMethods: ocrMethods,
       poorOcrPages: poorOcrPages,
+      geminiRequested: bestQualityOcr,
+      geminiPages: geminiPages,
+      geminiFailure: geminiFailureKind,
     );
   }
 
@@ -475,6 +523,10 @@ class PdfImportService {
     final mlKit = runOcr ?? _runOcrWithMlKit;
     var text = await mlKit(bytes);
     var method = OcrMethod.mlKit;
+    // Gemini honesty (20 Nov 2026): same recording as the PDF path
+    // — a silent best-quality failure must reach the preview.
+    GeminiFailureKind? geminiFailureKind;
+    var geminiPages = 0;
     if (urduBook || containsUrduScript(text)) {
       try {
         final tess = runTesseract ?? runTesseractOnBytes;
@@ -496,9 +548,12 @@ class PdfImportService {
         if (vision.text.trim().isNotEmpty) {
           text = vision.text;
           method = OcrMethod.gemini;
+          geminiPages++;
         }
+      } on GeminiException catch (e) {
+        geminiFailureKind ??= e.kind;
       } catch (_) {
-        // Keep the on-device text.
+        geminiFailureKind ??= GeminiFailureKind.unknown;
       }
     }
     if (isCancelled()) throw const PdfImportCancelled();
@@ -526,6 +581,9 @@ class PdfImportService {
       poorOcrPages: assessOcrQuality(text) == OcrQuality.good
           ? const []
           : const [1],
+      geminiRequested: bestQualityOcr,
+      geminiPages: geminiPages,
+      geminiFailure: geminiFailureKind,
     );
   }
 
@@ -618,6 +676,9 @@ class PdfImportService {
     required Map<String, dynamic> maps,
     Map<int, String> ocrMethods = const {},
     List<int> poorOcrPages = const [],
+    bool geminiRequested = false,
+    int geminiPages = 0,
+    GeminiFailureKind? geminiFailure,
   }) {
     final questions = (maps['questions'] as List)
         .cast<Map<String, dynamic>>()
@@ -681,6 +742,9 @@ class PdfImportService {
           (maps['keyPaperReport'] as List?)?.cast<String>() ?? const [],
       ocrMethods: ocrMethods,
       poorOcrPages: poorOcrPages,
+      geminiRequested: geminiRequested,
+      geminiPages: geminiPages,
+      geminiFailure: geminiFailure,
     );
   }
 

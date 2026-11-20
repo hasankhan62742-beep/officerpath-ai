@@ -63,6 +63,27 @@
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_icon"
             android:resource="@mipmap/ic_launcher" />
+        <!-- In-app updates (v2.0.3 fix): the ota_update plugin fires
+             ACTION_INSTALL_PACKAGE with a FileProvider URI for the
+             downloaded APK. WITHOUT this provider the install step
+             throws IllegalArgumentException ("Couldn't find meta-data
+             for provider …ota_update_provider") on the main thread —
+             an uncaught native crash the moment a download completes
+             (owner's phone, v2.0.1 → v2.0.2, 20 Nov 2026 14:59 PKT).
+             This is the provider the plugin's README requires; the
+             file paths live in res/xml/filepaths.xml. The
+             InstallResultReceiver is NOT declared: it is only used
+             by the PackageInstaller (silent-install) path, which the
+             app does not use (usePackageInstaller is false). -->
+        <provider
+            android:name="sk.fourq.otaupdate.OtaUpdateFileProvider"
+            android:authorities="${applicationId}.ota_update_provider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/filepaths" />
+        </provider>
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="officerpath_updates" />

@@ -290,15 +290,21 @@ String? monthHeadingLabel(String line) {
 
 /// Start of one key entry inside a key token stream:
 /// "1. ", "1-C ", "1) ", "Q1: ", "61. (C) …". After the separator
-/// there must be whitespace, an answer letter, or end of blob — so a
-/// decimal inside an answer ("43.75%") is never read as a new entry
-/// ("43."), while compact runs ("1.C 2.A") still work.
+/// there must be whitespace, an answer letter, an opening paren, or
+/// end of blob — so a decimal inside an answer ("43.75%") is never
+/// read as a new entry ("43."), while compact runs ("1.C 2.A",
+/// "44,(C) …" — OCR drops the space after the separator) still work.
+/// The separator class also accepts a comma: OCR often reads the
+/// entry period as a comma ("13, (B) …", "41, (D) …" — Tesseract on
+/// the PPSC-66 key, 20 Nov 2026), and a comma is safe here because
+/// the lookahead still blocks thousands separators ("138,000" —
+/// "138," is followed by "0", not whitespace or a letter).
 // The lookahead accepts A–E, not just A–D: E is a real answer
 // letter for 5-option questions (fiveOptionAnswerE), so a key entry
 // "1-E" must be PARSED (and then reported unresolved if the question
 // has only 4 options) rather than silently dropped.
 final _keyEntryStartRe = RegExp(
-  r'(?:^|\s)(?:Q\s*)?(\d+)\s*[\.\)\:\-](?=\s|[A-Ea-e]\b|$)',
+  r'(?:^|\s)(?:Q\s*)?(\d+)\s*[\.\)\:\-,](?=\s|[A-Ea-e]\b|\(|$)',
   caseSensitive: false,
 );
 

@@ -299,6 +299,25 @@ void main() {
     expect(entries.containsKey(43), isFalse);
   });
 
+  test('parseKeyEntries: OCR comma separator ("13, (B)") is an entry',
+      () {
+    // Tesseract on the PPSC-66 key reads the entry period as a comma
+    // ("13, (B) Should the poor", "41, (D) None of these" — 20 Nov
+    // 2026). Those entries were silently lost. A comma is safe as a
+    // separator because the lookahead still blocks thousands
+    // separators ("138,000" — "138," is followed by "0").
+    final entries = parseKeyEntries(
+      '138,000 men marched 13, (B) Should the poor '
+      '41, (D) None of these '
+      '44,(C) To reverse the condition 56, (D) None of these',
+    );
+    expect(entries[13], '(B) Should the poor');
+    expect(entries[41], '(D) None of these');
+    expect(entries[44], '(C) To reverse the condition');
+    expect(entries[56], '(D) None of these');
+    expect(entries.containsKey(138), isFalse);
+  });
+
   test('segmentText: key lines excluded, paper segments tracked', () {
     final seg = segmentText([
       'WHO is WHO in Pakistan',

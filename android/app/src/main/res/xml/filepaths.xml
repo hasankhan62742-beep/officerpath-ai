@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider paths for the ota_update plugin (v2.0.3 fix).
+     The plugin downloads the APK to <internal>/files/ota_update/
+     and hands its URI to the system installer. Without this file
+     (and the <provider> in AndroidManifest.xml) the install step
+     throws on the main thread the moment a download completes. -->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <files-path name="internal_apk_storage" path="ota_update/"/>
+</paths>

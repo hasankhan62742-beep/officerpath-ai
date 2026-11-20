@@ -339,11 +339,26 @@ class AppUpdateService {
         ),
       );
     }
-    return OtaUpdate().execute(
-      update.downloadUrl,
-      destinationFilename: update.fileName,
-      sha256checksum: expected.toLowerCase(),
-    );
+    // Never throw synchronously: OtaUpdate.execute() throws
+    // OtaUpdateException for an invalid filename (a '/' in it) —
+    // thrown from the download dialog's initState that would break
+    // the dialog instead of showing an honest error. Fail closed
+    // with a DOWNLOAD_ERROR event, like every other failure.
+    try {
+      return OtaUpdate().execute(
+        update.downloadUrl,
+        destinationFilename: update.fileName,
+        sha256checksum: expected.toLowerCase(),
+      );
+    } on OtaUpdateException catch (e) {
+      return Stream<OtaEvent>.value(
+        OtaEvent(
+          OtaStatus.DOWNLOAD_ERROR,
+          'Update start nahi ho saka (${e.message}) — GitHub link se '
+          'install karein.',
+        ),
+      );
+    }
   }
 
   /// The user dismissed the prompt for [tag] — don't nag again for the

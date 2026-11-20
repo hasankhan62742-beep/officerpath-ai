@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:officerpath_ai/services/app_update_service.dart';
@@ -446,6 +447,66 @@ void main() {
       // build passes PLAY_BUILD=true and this flips to false — see
       // docs/release-signing.md §3.
       expect(AppUpdateService.selfUpdateEnabled, isTrue);
+    });
+  });
+
+  group('FileProvider for the install step (20 Nov 2026 crash)', () {
+    // The in-app updater crashed the owner's phone the moment a
+    // v2.0.2 download COMPLETED (14:59 PKT): the ota_update plugin
+    // fires ACTION_INSTALL_PACKAGE with a FileProvider URI, and the
+    // provider was never declared in AndroidManifest.xml — so
+    // FileProvider.getUriForFile threw IllegalArgumentException on
+    // the main thread, uncaught, native crash. The plugin's README
+    // requires this exact provider. These tests read the manifest +
+    // paths file so the declaration can never silently regress.
+    // (File reads use the project root, like the G8 source check in
+    // extraction_preview_test.dart.)
+    test('AndroidManifest declares the ota_update FileProvider', () {
+      final manifest = File(
+        'android/app/src/main/AndroidManifest.xml',
+      ).readAsStringSync();
+      expect(
+        manifest,
+        contains('sk.fourq.otaupdate.OtaUpdateFileProvider'),
+      );
+      expect(
+        manifest,
+        contains(r'${applicationId}.ota_update_provider'),
+      );
+      expect(manifest, contains('android.support.FILE_PROVIDER_PATHS'));
+      expect(manifest, contains('@xml/filepaths'));
+    });
+
+    test('filepaths.xml covers the plugin download directory', () {
+      final paths = File(
+        'android/app/src/main/res/xml/filepaths.xml',
+      ).readAsStringSync();
+      // The plugin downloads to <internal>/files/ota_update/.
+      expect(paths, contains('<files-path'));
+      expect(paths, contains('ota_update/'));
+    });
+
+    test('downloadAndInstall never throws for a bad filename', () async {
+      // OtaUpdate.execute() throws OtaUpdateException synchronously
+      // when the filename contains '/'. The service must fail closed
+      // with a DOWNLOAD_ERROR event instead of throwing out of the
+      // download dialog's initState.
+      const sha =
+          '6c18f336242cad88636b05b3698518c8e6baede9333f77b8aa3d0d74c71636bb';
+      final events = await AppUpdateService.instance
+          .downloadAndInstall(
+            const AppUpdateInfo(
+              latestVersion: '2.0.2',
+              tag: 'v2.0.2',
+              downloadUrl: 'https://example.com/officerpath-ai.apk',
+              fileName: 'bad/name.apk',
+              assetSize: 53005162,
+              sha256: sha,
+            ),
+          )
+          .toList();
+      expect(events, hasLength(1));
+      expect(events.single.status, OtaStatus.DOWNLOAD_ERROR);
     });
   });
 }

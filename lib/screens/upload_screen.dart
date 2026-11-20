@@ -8,6 +8,7 @@ import '../models/exam.dart';
 import '../models/question.dart';
 import '../services/answer_key.dart';
 import '../services/book_selection.dart';
+import '../services/document_status.dart';
 import '../services/docx_text_extractor.dart';
 import '../services/mcq_parser.dart';
 import '../services/parse_validation.dart';
@@ -369,6 +370,21 @@ class _UploadScreenState extends State<UploadScreen> {
         'sakte hain.',
       );
     }
+    // Centralized answer status (MASTER DIRECTIVE §2–§3, 20 Nov
+    // 2026): ONE status + accurate counts for this import, computed
+    // once from the same result the dialog shows. The dialog never
+    // says "no answers attached" when a key was detected — the
+    // status line below is the single source of truth.
+    final answerStatus = classifyDocumentStatus(
+      working,
+      hasBlockingErrors: validation.hasErrors,
+    );
+    lines.add('• ${documentStatusLine(working, answerStatus)}');
+    // Gemini honesty (20 Nov 2026): when best quality was ticked
+    // but Gemini did not run, say so with the reason — never present
+    // an ML Kit result as a Gemini result.
+    final geminiLine = geminiFailureLine(working);
+    if (geminiLine != null) lines.add('• $geminiLine');
     // G-C6 (Phase A): OCR-sourced answers must be VISIBLE as
     // low-confidence, not just stored in the model. The count is
     // here; each such question also carries its warning in the
@@ -461,6 +477,7 @@ class _UploadScreenState extends State<UploadScreen> {
         showMpt: mptSuggestion != null,
         keyAttachMessage: keyAttachMessage,
         validation: validation,
+        answerStatus: answerStatus,
       ),
     );
     if (decision == null || decision.action == 'cancel') return;
@@ -1144,12 +1161,30 @@ class NoMcqsDialog extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isLetter = isAdmissionLetterText(result.text);
+    // Centralized status (MASTER DIRECTIVE §2–§3, 20 Nov 2026): the
+    // same classification the Save dialog uses — one status for one
+    // import, computed from the same result.
+    final status = classifyDocumentStatus(result);
+    final showNoAnswersNotice =
+        status == DocumentAnswerStatus.noAnswerKeyDetected &&
+        result.answerPending.isNotEmpty;
+    final showAnswerStatusBox =
+        status != DocumentAnswerStatus.noAnswerKeyDetected &&
+        status != DocumentAnswerStatus.answersFullyVerified;
     final diagnostics = <String>[
       'Pages parhe gaye: ${result.pageCount} '
       '(text pages: ${result.textPages}, OCR pages: ${result.ocrPages.length})',
-      'Answer Key: ${result.keySectionsFound > 0 ? '${result.keySectionsFound} mili, ${result.keyEntriesApplied} jawab lage' : 'nahi mili'}',
+      // A key can be detected without a heading (key-only lines) —
+      // use the centralized check, never the section count alone.
+      'Answer Key: ${keyDetected(result) ? '${result.keySectionsFound} section(s), ${result.keyEntriesApplied} jawab lage, ${result.unmatchedKeyEntries.length} be-jawab' : 'nahi mili'}',
       'Jawab ke baghair questions: ${result.answerPending.length}',
+      documentStatusLine(result, status),
     ];
+    // Gemini honesty (20 Nov 2026): when best quality was ticked
+    // but Gemini did not run, say so with the reason — never present
+    // an ML Kit result as a Gemini result.
+    final geminiLine = geminiFailureLine(result);
+    if (geminiLine != null) diagnostics.add(geminiLine);
     if (result.answerSources.isNotEmpty) {
       diagnostics.add(
         'Answers: ${result.answerSources.entries.map((e) => '${e.value} ${e.key} se').join(', ')}',
@@ -1188,12 +1223,19 @@ class NoMcqsDialog extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(reason),
-            // No-answers notice (20 Nov 2026): when EVERY parsed
-            // question lacks an answer, the dialog must say so
-            // plainly too — not only when some do.
-            if (!isLetter && result.answerPending.isNotEmpty) ...[
+            // No-answers notice (20 Nov 2026): ONLY when the
+            // centralized status says no key was detected at all.
+            // When a key was detected (even unmatched), the amber
+            // status box shows the accurate counts instead.
+            if (!isLetter && showNoAnswersNotice) ...[
               const SizedBox(height: 12),
               const NoAnswersNoticeBox(),
+            ],
+            if (!isLetter && showAnswerStatusBox) ...[
+              const SizedBox(height: 12),
+              AnswerStatusBox(
+                line: documentStatusLine(result, status),
+              ),
             ],
             const SizedBox(height: 12),
             const Text(
@@ -1492,6 +1534,47 @@ class NoAnswersNoticeBox extends StatelessWidget {
               style: TextStyle(
                 fontWeight: FontWeight.bold,
                 color: Color(0xFF1B5E20),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The amber answer-status box (MASTER DIRECTIVE §6, 20 Nov 2026):
+/// shown in the Save dialog whenever a key was detected but the
+/// answers are not fully verified — the ONE accurate-counts line
+/// (total questions, key entries, matched, unmatched, missing,
+/// conflicting) from the centralized status pipeline. It replaces
+/// the green "no answers attached" notice in exactly those cases, so
+/// the dialog can never show both at once.
+class AnswerStatusBox extends StatelessWidget {
+  const AnswerStatusBox({super.key, required this.line});
+
+  final String line;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF8E1),
+        border: Border.all(color: const Color(0xFF8D6E00)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      padding: const EdgeInsets.all(12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.key_outlined, color: Color(0xFF8D6E00)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              line,
+              style: const TextStyle(
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF5D4037),
               ),
             ),
           ),
@@ -1862,6 +1945,7 @@ class ExtractionPreviewDialog extends StatefulWidget {
     required this.showMpt,
     this.keyAttachMessage,
     this.validation,
+    this.answerStatus,
   });
 
   final PdfImportResult result;
@@ -1880,6 +1964,12 @@ class ExtractionPreviewDialog extends StatefulWidget {
   /// infos are shown as a note.
   final ValidationReport? validation;
 
+  /// Centralized answer status (MASTER DIRECTIVE §2–§3), computed
+  /// once by the caller from the same result. Null in direct widget
+  /// tests — the dialog then classifies from the result itself, so
+  /// the status is always the same function of the same result.
+  final DocumentAnswerStatus? answerStatus;
+
   @override
   State<ExtractionPreviewDialog> createState() =>
       _ExtractionPreviewDialogState();
@@ -1887,6 +1977,33 @@ class ExtractionPreviewDialog extends StatefulWidget {
 
 class _ExtractionPreviewDialogState extends State<ExtractionPreviewDialog> {
   late List<Question> _questions;
+
+  /// The one status for this import — the caller's value when given,
+  /// else classified here from the same result + validation. Either
+  /// way it is the SAME function of the SAME result (single source
+  /// of truth, MASTER DIRECTIVE §2).
+  DocumentAnswerStatus get _answerStatus =>
+      widget.answerStatus ??
+      classifyDocumentStatus(
+        widget.result,
+        hasBlockingErrors: widget.validation?.hasErrors ?? false,
+      );
+
+  /// The green "no answers attached" notice shows ONLY when the
+  /// document genuinely has no key and no answers. When a key was
+  /// detected — even if nothing matched — it is forbidden, and the
+  /// amber status box shows the accurate counts instead. The two
+  /// must never appear together (the phone's PPSC-66 contradiction).
+  bool get _showNoAnswersNotice =>
+      _answerStatus == DocumentAnswerStatus.noAnswerKeyDetected &&
+      widget.result.answerPending.isNotEmpty;
+
+  /// The amber status box shows for every key-detected or
+  /// conflicted status that is not fully verified — the headline
+  /// counts; the validation box below it carries the detail.
+  bool get _showAnswerStatusBox =>
+      _answerStatus != DocumentAnswerStatus.noAnswerKeyDetected &&
+      _answerStatus != DocumentAnswerStatus.answersFullyVerified;
 
   @override
   void initState() {
@@ -1917,13 +2034,21 @@ class _ExtractionPreviewDialogState extends State<ExtractionPreviewDialog> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // No-answers notice (20 Nov 2026): whenever the parse
-              // found questions without answers, say so FIRST and
-              // plainly — the user sent questions only. The notice
-              // shows even when SOME questions have answers; the
-              // pending ones are listed by the manual flow.
-              if (widget.result.answerPending.isNotEmpty) ...[
+              // No-answers notice (20 Nov 2026): ONLY when the
+              // centralized status says no key was detected at all.
+              // When a key was detected (even unmatched), the amber
+              // status box below shows the accurate counts instead —
+              // never the green "no answers attached" notice.
+              if (_showNoAnswersNotice) ...[
                 const NoAnswersNoticeBox(),
+                const SizedBox(height: 16),
+              ] else if (_showAnswerStatusBox) ...[
+                AnswerStatusBox(
+                  line: documentStatusLine(
+                    widget.result,
+                    _answerStatus,
+                  ),
+                ),
                 const SizedBox(height: 16),
               ],
               if (widget.keyAttachMessage != null) ...[

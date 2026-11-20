@@ -318,4 +318,151 @@ void main() {
       expect(src, contains('Flashcards:'));
     });
   });
+
+  group('centralized answer status in the preview (20 Nov 2026)', () {
+    PdfImportResult phoneCase() {
+      // The owner's PPSC-66 phone case, reduced: 1 answered + 1
+      // pending question, a key detected with 5 unmatched entries,
+      // 0 applied. The old dialog showed the green "no answers
+      // attached" notice AND the amber unmatched-key warnings at
+      // the same time — a contradiction. The status is
+      // ANSWERS EXTRACTED BUT UNMATCHED.
+      return PdfImportResult(
+        text: '',
+        pageCount: 7,
+        textPages: 0,
+        ocrPages: const [1, 2, 3, 4, 5, 6, 7],
+        ocrCapped: false,
+        questions: [
+          q(
+            text: 'The transition period of Brexit ended on:',
+            correct: 1,
+            source: 'key',
+            page: 7,
+          ),
+        ],
+        parsed: 1,
+        skipped: 0,
+        errors: const [],
+        formats: const {'block': 1},
+        generatedOptions: 0,
+        excluded: const [],
+        keySectionsFound: 1,
+        keyEntriesApplied: 0,
+        questionsMissingAnswers: const ['Paper 67 Q2'],
+        unmatchedKeyEntries: const [
+          'Paper 66 key entry 1 — no matching question',
+          'Paper 66 key entry 2 — no matching question',
+          'Paper 66 key entry 21 — no matching question',
+          'Paper 66 key entry 22 — no matching question',
+          'Paper 66 key entry 3 — no matching question',
+        ],
+        answerPending: [
+          PendingQuestion(
+            text: 'Shin Bet is security intelligence agency of:',
+            options: ['Israel', 'Russia', 'Japan', 'None of these'],
+            subject: Subject.gk,
+            page: 7,
+          ),
+        ],
+      );
+    }
+
+    testWidgets(
+        'key detected but unmatched: amber status box, NO green notice',
+        (tester) async {
+      PreviewDecision? decision;
+      await pumpPreview(
+        tester,
+        phoneCase(),
+        showManual: true,
+        onDecision: (d) => decision = d,
+      );
+      expect(find.text('Save these MCQs?'), findsOneWidget);
+      // The accurate-counts status box is shown…
+      expect(find.byType(AnswerStatusBox), findsOneWidget);
+      expect(
+        find.textContaining('Key mili, jawab kisi sawal se nahi lage'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('5 entries'), findsOneWidget);
+      // …and the green "no answers attached" notice is forbidden.
+      expect(find.byType(NoAnswersNoticeBox), findsNothing);
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(decision, isNotNull);
+    });
+
+    testWidgets('genuinely no key: green notice, no status box',
+        (tester) async {
+      PreviewDecision? decision;
+      final noKey = PdfImportResult(
+        text: '',
+        pageCount: 1,
+        textPages: 0,
+        ocrPages: const [1],
+        ocrCapped: false,
+        questions: [
+          q(
+            text: 'Shin Bet is security intelligence agency of:',
+            correct: -1,
+            source: '',
+            page: 7,
+          ),
+        ],
+        parsed: 1,
+        skipped: 0,
+        errors: const [],
+        formats: const {'block': 1},
+        generatedOptions: 0,
+        excluded: const [],
+        questionsMissingAnswers: const ['Q1'],
+        answerPending: [
+          PendingQuestion(
+            text: 'Shin Bet is security intelligence agency of:',
+            options: ['Israel', 'Russia', 'Japan', 'None of these'],
+            subject: Subject.gk,
+            page: 7,
+          ),
+        ],
+      );
+      // Same as pumpPreview, but WITHOUT pumpAndSettle: the green
+      // notice card pulses forever, so settle never returns. A
+      // single pump renders the dialog fine.
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) {
+              return Scaffold(
+                body: TextButton(
+                  onPressed: () async {
+                    final d = await showDialog<PreviewDecision>(
+                      context: context,
+                      builder: (_) => ExtractionPreviewDialog(
+                        result: noKey,
+                        summaryLines: const [
+                          'Parsed 1 MCQs from "No Key Test".',
+                        ],
+                        showManual: true,
+                        showMpt: false,
+                      ),
+                    );
+                    decision = d;
+                  },
+                  child: const Text('Open preview'),
+                ),
+              );
+            },
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open preview'));
+      await tester.pump();
+      expect(find.byType(NoAnswersNoticeBox), findsOneWidget);
+      expect(find.byType(AnswerStatusBox), findsNothing);
+      await tester.tap(find.text('Save'));
+      await tester.pump();
+      expect(decision, isNotNull);
+    });
+  });
 }

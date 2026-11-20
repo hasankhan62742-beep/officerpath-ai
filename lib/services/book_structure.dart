@@ -362,6 +362,24 @@ bool _isOrgHeading(String text) {
   return _isAllCaps(text) && _alphaWordCount(text) <= 8;
 }
 
+/// A line starting with a question number whose digits were misread
+/// by OCR ("S1." for "51.", "I2." for "12.", "$1." for "51." — the
+/// leading letter/symbol is the misread digit). Clean numbers are
+/// already caught by [_questionStartRe]; this catches the noisy
+/// ones. A real heading never starts with a 1–3 char letter/digit
+/// token + separator ("2021 Current Affairs" has 4 digits + a space,
+/// no separator; "Chapter 3" has no separator after the word).
+final _misreadNumberStartRe = RegExp(
+  r'^[A-Za-z]?[0-9IlOSBZ$§]{1,3}[.\)\:\-]\s',
+);
+
+/// An option marker ANYWHERE in the line ("(A) …", "(B) …" — or the
+/// OCR misreads "(8)" / "(0)" for "(B)" / "(D)"). A question stem or
+/// option tail carrying one is question content, never a heading.
+/// "(BS-16)" does not match (the char after B is a letter, not a
+/// bracket or space), so paper headings are untouched.
+final _optionMarkerAnywhereRe = RegExp(r'\([A-Da-d08][\)\s]');
+
 /// Strong heading: short line matching a paper / post / chapter /
 /// subject / month / year / org pattern. Works at any position in
 /// the book.
@@ -388,6 +406,17 @@ bool _isStrongHeading(String text) {
   // (the Sir Tauqeer + Pace books are split by month; a bare month
   // line with no subject phrase still counts).
   if (monthHeadingLabel(text) != null) return true;
+  // A line starting lowercase is a sentence fragment (an OCR stem
+  // continuation — "difficult I thjnk he speaks English…", "to
+  // English of word: …"), never a subject heading: real headings
+  // are Title-Case or ALL-CAPS. Applies ONLY to the subject-phrase
+  // branch, so paper / month / chapter headings above are
+  // unaffected (and Urdu-start lines have no case to check).
+  if (text.isNotEmpty &&
+      RegExp(r'[a-z]').hasMatch(text[0]) &&
+      text[0] == text[0].toLowerCase()) {
+    return false;
+  }
   return _subjectPhrases.any((p) => lower.contains(p));
 }
 
@@ -417,6 +446,14 @@ bool _isExcludedLine(String text, Set<String> repeats) {
   if (_answerLineRe.hasMatch(text)) return true;
   if (isAnswerKeyHeading(text)) return true;
   if (_footerRe.hasMatch(text)) return true;
+  // OCR noise (20 Nov 2026): a question stem whose number was
+  // misread ("S1. Choose the best English translation…") or a stem
+  // / option tail carrying an option marker mid-line ("…speaks
+  // English. (A whether", "English Grammar (8) Unusual/openly")
+  // is question content, never a heading — the phone's PPSC-66
+  // parts were titled with exactly these stems.
+  if (_misreadNumberStartRe.hasMatch(text)) return true;
+  if (_optionMarkerAnywhereRe.hasMatch(text)) return true;
   // A worked-solution heading, its "Final Answer:" closer, and a
   // "(Note: …)" evidence line are never parts/sections (110/109
   // editions) — even when short enough to look like a heading.
@@ -441,9 +478,12 @@ bool _isExcludedLine(String text, Set<String> repeats) {
     return true;
   }
   if (RegExp(r'^\d{1,4}$').hasMatch(text)) return true;
-  final pagePrefix = RegExp(r'^(\d{1,4})\s+[A-Z]').firstMatch(text);
+  final pagePrefix =
+      RegExp(r'^[^A-Za-z0-9]?\d{1,4}\s+[A-Z]').firstMatch(text);
   if (pagePrefix != null) {
-    final n = int.tryParse(pagePrefix.group(1)!);
+    final n = int.tryParse(
+      RegExp(r'\d+').firstMatch(text)!.group(0)!,
+    );
     if (n != null && (n < 1900 || n > 2099)) return true;
   }
   if (repeats.contains(_repeatKey(text))) return true;
@@ -571,13 +611,21 @@ BookStructure detectBookStructure(List<PageText> pages) {
     // heading after the key ("Paper 2") gets marked as its
     // "continuation" and is lost as a part.
     if (_isKeyEntryLine(t)) continue;
-    if (!_questionStartRe.hasMatch(t)) continue;
+    // A probable question start: a clean number ("51. …") OR an
+    // OCR-misread one ("S1. …" — the digit read as a letter).
+    // Marking the span means its stem continuations can never
+    // become part titles, even when the number itself is garbled.
+    if (!_questionStartRe.hasMatch(t) &&
+        !_misreadNumberStartRe.hasMatch(t)) {
+      continue;
+    }
     inQuestion.add(idx);
     var j = idx + 1;
     while (j < lines.length && j - idx <= 5) {
       final nt = stripBoldMarkers(lines[j].text).trim();
       if (nt.isEmpty) break;
       if (_questionStartRe.hasMatch(nt)) break;
+      if (_misreadNumberStartRe.hasMatch(nt)) break;
       if (isAnswerKeyHeading(nt)) break;
       if (monthHeadingLabel(nt) != null) break;
       if (yearHeadingLabel(nt) != null) break;
