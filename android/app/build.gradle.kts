@@ -65,6 +65,13 @@ android {
             // the APK is not debuggable.
             isMinifyEnabled = true
             isShrinkResources = true
+            // R8 rules (ML Kit dontwarn etc.) — without this the release
+            // build fails at minifyReleaseWithR8 on missing optional
+            // ML Kit script-recognizer classes (20 Nov 2026).
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
             // AUDIT m5: a release build must NEVER silently fall back to
             // the debug key — a debug-signed AAB could be shipped to Play
             // by mistake. Fail fast when key.properties is missing; debug
