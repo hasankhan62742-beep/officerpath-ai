@@ -375,16 +375,81 @@ class _AnswerlessCandidate {
 /// The "Q." + digits + separator shape ("Q.1:") needs the optional
 /// dot before the digits — the old `^(?:Q\s*)?(\d+)` could not match
 /// "Q.1:" at all.
-int? _questionNumber(String firstLine) {
+/// The number may also be OCR-misread ("S1." for "51.", "I2." for
+/// "12."): the fallback decodes it via [decodeOcrNumber]; a token
+/// with no real digit is not a number (see there).
+/// [decoded] is true only when the number came from a misread token.
+/// A decoded number is evidence that must fit its neighbours (the
+/// sequence validation demotes one that does not) — never a fact.
+({int? number, bool decoded}) _questionNumberDetailed(String firstLine) {
   final m = RegExp(
     // A decimal ("92.97 m …") is not a question number: the separator
     // must not be followed by another digit.
     r'^(?:Q\s*\.?\s*)?(\d+)\s*[\.\)\:](?!\d)',
     caseSensitive: false,
   ).firstMatch(firstLine);
-  if (m == null) return null;
-  return int.tryParse(m.group(1)!);
+  if (m != null) {
+    return (number: int.tryParse(m.group(1)!), decoded: false);
+  }
+  final n = RegExp(
+    // A misread number never takes ":" as its separator: the
+    // proper-sequence labels "S1:" / "S6:" (Examveda) use a colon,
+    // and "S1" decodes to 51 — a colon after a misread token is a
+    // label, not a question number. Clean digits keep ":" above.
+    r'^(?:Q\s*\.?\s*)?(' +
+        ocrNumberTokenPattern +
+        r')\s*[\.\)](?!\d)',
+    caseSensitive: false,
+  ).firstMatch(firstLine);
+  if (n == null) return (number: null, decoded: false);
+  final d = decodeOcrNumber(n.group(1)!);
+  return (number: d, decoded: d != null);
 }
+
+int? _questionNumber(String firstLine) =>
+    _questionNumberDetailed(firstLine).number;
+
+/// True when [clean] starts with an OCR-misread question number
+/// ("S1.", "I2.", "B8.", "O5." — a digit confusion, see
+/// [decodeOcrNumber]) followed by a separator and stem text. The
+/// decode check is what keeps a bare letter ("B.", "S.") from ever
+/// counting as a question start. The separator is "." or ")" only —
+/// never ":": the proper-sequence labels "S1:" / "S6:" (Examveda)
+/// use a colon, and "S1" decodes to 51, so a colon after a misread
+/// token is a label, not a question number (20 Nov 2026). The
+/// separator must not be followed by a digit — the same (?!\d)
+/// guard as the clean number regex: "6.2x20 = 124." is a decimal /
+/// equation, not question 6 (MPT Block 88, Examveda +27 skipped,
+/// 20 Nov 2026).
+bool isMisreadNumberStart(String clean) {
+  final m = RegExp(
+    r'^(?:Q\s*\.?\s*)?([0-9IiLlOoSsBbZz$§]{1,3})\s*[\.\)](?!\d)\s*\S',
+  ).firstMatch(clean);
+  if (m == null) return false;
+  return decodeOcrNumber(m.group(1)!) != null;
+}
+
+/// Leading bare number of [clean] ("52", "1947", or OCR-misread
+/// "S2"), plus whether it came from a misread token. The bare-number
+/// question path ("52 Who founded …?") shares this with the prefix
+/// strip: a pure-digit token parses directly (any length — a year
+/// like 1947 is a bare number too), a misread token decodes via
+/// [decodeOcrNumber]. A token with no real digit is not a number.
+({int? number, bool decoded}) _bareNumberAtStartDetailed(String clean) {
+  final digits = RegExp(r'^(\d+)\s+(?![a-z0-9])').firstMatch(clean);
+  if (digits != null) {
+    return (number: int.tryParse(digits.group(1)!), decoded: false);
+  }
+  final misread = RegExp(
+    r'^([0-9IiLlOoSsBbZz$§]{1,3})\s+(?![a-z0-9])',
+  ).firstMatch(clean);
+  if (misread == null) return (number: null, decoded: false);
+  final n = decodeOcrNumber(misread.group(1)!);
+  return (number: n, decoded: n != null);
+}
+
+int? _bareNumberAtStart(String clean) =>
+    _bareNumberAtStartDetailed(clean).number;
 
 /// Strips the question-number prefix from [text]: the dotted / "Q"
 /// forms via [questionPrefixRe], plus a BARE number ("3 What …?" —
@@ -408,7 +473,15 @@ String _stripQuestionNumberPrefix(String text) {
   var t = text.replaceFirst(questionPrefixRe, '');
   final trimmed = t.trimRight();
   if (trimmed.endsWith('?') || trimmed.endsWith('؟')) {
-    t = t.replaceFirst(RegExp(r'^\d+\s+(?![a-z0-9])'), '');
+    // Bare number — clean ("52 Who …?") or OCR-misread ("S1 What
+    // is …?"): the number is only stripped when [_bareNumberAtStart]
+    // pins it down, so a list item or year line keeps its text.
+    if (_bareNumberAtStart(t) != null) {
+      t = t.replaceFirst(
+        RegExp(r'^[0-9IiLlOoSsBbZz$§]{1,3}\s+(?![a-z0-9])'),
+        '',
+      );
+    }
   }
   return t;
 }
@@ -606,7 +679,18 @@ final _tableKeyLetterRe = RegExp(r'^\(?\s*([A-Ea-e])\s*[\)\.\:]?\s*$');
 /// is the marker letter, group 2 the option text. Same shape as the
 /// block parser's option lines; a bare single letter ("A") is NOT a
 /// marker (it can be the article "a" as an option value).
-final _optionMarkerRe = RegExp(r'^\(?([A-Da-d])[\)\.\:\-]\s*(.+)$');
+/// The digit form accepts 8 and 0 ONLY parenthesised ("(8)", "(0)"):
+/// OCR reads (B) as (8) and (D) as (0) (Tesseract on PPSC-66, 20 Nov
+/// 2026: "(0)" 26x, "(8)" 15x). Callers decode group 1 (or group 3)
+/// with [decodeOcrOptionLetter]; 4 is NOT accepted — it is a valid
+/// option number, so "(4)" stays ambiguous and is never treated as
+/// (A). A bare "8." / "0." is a question number (Q8/Q0), never an
+/// option marker — the bare-digit form in the earlier [A-Da-d80]
+/// class faked a marker on real table cells (F3 27→26, 20 Nov 2026),
+/// distrusting a real row's answer. Groups: 1 = letter marker,
+/// 2 = letter rest, 3 = digit marker, 4 = digit rest.
+final _optionMarkerRe =
+    RegExp(r'^\(?([A-Da-d])[\)\.\:\-]\s*(.+)$|^\(([80])[\)]\s*(.+)$');
 
 /// True when [t] is a page footer ("Page 1", "Page 1 of 71") — never
 /// table content, never a question stem.
@@ -1082,10 +1166,17 @@ class _TableSink {
     for (var k = 0; k < opts.length; k++) {
       final m = _optionMarkerRe.firstMatch(opts[k]);
       if (m != null) {
+        // Decode an OCR-misread marker (8→B, 0→D) before comparing
+        // it with the column position. The digit form only ever
+        // matches parenthesised ("(8)"), so group 3 is the digit
+        // marker and group 4 its rest.
         final markerLetter =
-            m.group(1)!.toUpperCase().codeUnitAt(0) - 65;
+            decodeOcrOptionLetter(m.group(1) ?? m.group(3)!)
+                .toUpperCase()
+                .codeUnitAt(0) -
+            65;
         if (markerLetter != k) markerMismatch = true;
-        strippedOpts.add(m.group(2)!.trim());
+        strippedOpts.add((m.group(2) ?? m.group(4)!).trim());
       } else {
         strippedOpts.add(opts[k]);
       }
@@ -1597,7 +1688,7 @@ List<_TableCell> _collectTableOptionRun(
       // content is judged as a bare option.
       final m =
           _optionMarkerRe.firstMatch(stripBoldMarkers(cellText).trim());
-      if (m != null) optionLike = _isTableOptionLine(m.group(2)!);
+      if (m != null) optionLike = _isTableOptionLine((m.group(2) ?? m.group(4)!));
     }
     if (!optionLike) break;
     run.add(cells[k]);
@@ -2167,6 +2258,14 @@ ParseResult _parseImpl(
     r'^(Q\s*\d*[\.\)\:]|\d+[\.\)](?!\d))\s*\S',
     caseSensitive: false,
   );
+  // A question-start line, including OCR-misread numbers: the number
+  // slot is digits only, so a Latin letter there is a misread digit
+  // (S→5, I→1, O→0, B→8, Z→2 — see [decodeOcrNumber]). The misread
+  // branch runs second, so a clean "51." never decodes, and a bare
+  // letter ("B.") never counts — [decodeOcrNumber] returns null
+  // without a real digit in the token.
+  bool isQStart(String clean) =>
+      questionStart.hasMatch(clean) || isMisreadNumberStart(clean);
   bool optionsFollow(List<SegmentedLine> lines, int from) {
     var found = 0;
     for (var j = from; j < lines.length && j < from + 8; j++) {
@@ -2278,9 +2377,14 @@ ParseResult _parseImpl(
   // question's first line ends mid-sentence, not with '?'. Without
   // this, a bare-numbered book collapses into ONE block and only
   // its first Q&A is ever found (PakMCQs parsed 0/500).
+  // The number slot is digits only — a Latin letter there is a
+  // misread digit (see [_bareNumberAtStart] / [decodeOcrNumber]), so
+  // "S1 What colour …?" is a bare-numbered question start too. The
+  // '?' guard is what keeps a list item or year line out: a bare
+  // number without '?' is never a question start.
   bool isBareNumberQuestionStart(String clean) =>
       (clean.endsWith('?') || clean.endsWith('؟')) &&
-      RegExp(r'^\d+\s+(?![a-z0-9])').hasMatch(clean);
+      _bareNumberAtStart(clean) != null;
   // True once the current block was started by a split at a question
   // start (numbered, bare-number, '?' or numberless — see below).
   // The initial block is front matter until proven otherwise; a block
@@ -2315,7 +2419,7 @@ ParseResult _parseImpl(
     if (current.isEmpty) return false;
     final first = _cleanStored(current.first.text);
     if (!currentIsQuestion &&
-        !questionStart.hasMatch(first) &&
+        !isQStart(first) &&
         !isUnnumberedQuestionStart(first)) {
       return false; // Front matter / header — not a question.
     }
@@ -2327,7 +2431,7 @@ ParseResult _parseImpl(
     // (MPT Q177/Q116: head stranded in the previous block, tail
     // parsed as a fragment, key entry unmatched).
     if (currentIsQuestion &&
-        !questionStart.hasMatch(first) &&
+        !isQStart(first) &&
         !isUnnumberedQuestionStart(first) &&
         !isPlausibleStemStart(first)) {
       return false; // Split-created, but starts with junk/prose —
@@ -2385,6 +2489,15 @@ ParseResult _parseImpl(
     if (_answerLineRe.hasMatch(clean)) return false;
     if (_explanationRe.hasMatch(clean)) return false;
     if (_subjectRe.hasMatch(clean)) return false;
+    // A CLEAN number is a numbered start, never a numberless stem.
+    // A MISREAD number ("S1.") is still eligible: the guarded
+    // numbered branch above only splits it when its options follow,
+    // so a misread question after a COMPLETE question (all 4 options
+    // present) splits here instead — the previous question being
+    // done is the proof this is a new question, not prose (MPT/F3/
+    // Examveda residuals, 20 Nov 2026). A fake misread line inside
+    // an unfinished question never splits here: the previous block
+    // does not have all 4 options yet.
     if (questionStart.hasMatch(clean)) return false;
     if (isUnnumberedQuestionStart(clean)) return false;
     return true;
@@ -2405,7 +2518,7 @@ ParseResult _parseImpl(
         current.add(line);
         continue;
       }
-      if ((questionStart.hasMatch(cleanLine) ||
+      if ((isQStart(cleanLine) ||
               isBareNumberQuestionStart(cleanLine) ||
               (isUnnumberedQuestionStart(cleanLine) &&
                   !currentIsUnfinishedQuestion())) &&
@@ -2428,6 +2541,18 @@ ParseResult _parseImpl(
     if ((questionStart.hasMatch(cleanLine) ||
             isBareNumberQuestionStart(cleanLine)) &&
         current.isNotEmpty) {
+      blocks.add(current);
+      current = <SegmentedLine>[];
+      currentIsQuestion = true;
+    } else if (isMisreadNumberStart(cleanLine) &&
+        optionsFollow(qLines, li + 1) &&
+        current.isNotEmpty) {
+      // An OCR-misread number is a question start ONLY when its
+      // options follow: a bare "B8." / "S1." line inside prose or a
+      // list is not a question, and splitting there cuts a real
+      // question in half (Examveda +165 skipped, 20 Nov 2026). A
+      // clean number always splits (long-standing behaviour) — the
+      // misread branch needs the options as proof.
       blocks.add(current);
       current = <SegmentedLine>[];
       currentIsQuestion = true;
@@ -2476,9 +2601,7 @@ ParseResult _parseImpl(
       final clean = _cleanStored(first);
       return _questionNumber(first) ??
           (isBareNumberQuestionStart(clean)
-              ? int.tryParse(
-                  RegExp(r'^\d+').firstMatch(clean)!.group(0)!,
-                )
+              ? _bareNumberAtStart(clean)
               : null);
     }
 
@@ -2536,6 +2659,90 @@ ParseResult _parseImpl(
         // Otherwise ambiguous (gap != run length, or trailing run):
         // leave null — never guess.
         i = j;
+      }
+    }
+  }
+
+  // Sequence validation for decoded numbers (category separation,
+  // 20 Nov 2026): a number recovered from an OCR-misread token is a
+  // hypothesis, not a fact — it survives only when it fits strictly
+  // between the trusted (clean-digit or sequence-interpolated)
+  // numbers around it in the same paper. A decoded number that
+  // duplicates a trusted number, or sits out of order, is demoted to
+  // null: its block stays pending and can never join a wrong key
+  // entry. Clean numbers are never demoted — the parser already
+  // trusts them, and a genuinely misnumbered book is the book's own
+  // defect, reported by the existing diagnostics. Only
+  // option-bearing blocks are validated: a block without options
+  // cannot become a question, so its number can never join a key.
+  final blockNumbers = <int?>[];
+  final blockNumbersDecoded = <bool>[];
+  for (var b = 0; b < blocks.length; b++) {
+    final first = blocks[b].first.text;
+    final cf = _cleanStored(first);
+    final detailed = _questionNumberDetailed(first);
+    var n = detailed.number;
+    var decoded = detailed.decoded;
+    if (n == null && isBareNumberQuestionStart(cf)) {
+      final bare = _bareNumberAtStartDetailed(cf);
+      n = bare.number;
+      decoded = bare.decoded;
+    }
+    n ??= recoveredNumbers[b];
+    blockNumbers.add(n);
+    blockNumbersDecoded.add(decoded);
+  }
+  {
+    String valBlockPaper(int i) {
+      for (final l in blocks[i]) {
+        if (_optionRe.hasMatch(_cleanStored(l.text))) return l.paper;
+      }
+      return blocks[i].first.paper;
+    }
+
+    final byPaper = <String, List<int>>{};
+    for (var i = 0; i < blocks.length; i++) {
+      if (blockNumbers[i] == null) continue;
+      if (!blocks[i].any(
+        (l) => _optionRe.hasMatch(_cleanStored(l.text)),
+      )) {
+        continue;
+      }
+      byPaper.putIfAbsent(valBlockPaper(i), () => []).add(i);
+    }
+    for (final indices in byPaper.values) {
+      final trusted = <int>{};
+      for (final i in indices) {
+        if (!blockNumbersDecoded[i]) trusted.add(blockNumbers[i]!);
+      }
+      int? prevAccepted;
+      for (var k = 0; k < indices.length; k++) {
+        final i = indices[k];
+        final n = blockNumbers[i]!;
+        if (!blockNumbersDecoded[i]) {
+          prevAccepted = n;
+          continue;
+        }
+        // (a) duplicates a trusted number in this paper, or (b) not
+        // strictly after the previous accepted number, or (c) not
+        // strictly before the next trusted number — demote.
+        var demote = trusted.contains(n) ||
+            (prevAccepted != null && n <= prevAccepted);
+        if (!demote) {
+          for (var j = k + 1; j < indices.length; j++) {
+            final nj = indices[j];
+            if (!blockNumbersDecoded[nj]) {
+              if (n >= blockNumbers[nj]!) demote = true;
+              break;
+            }
+          }
+        }
+        if (demote) {
+          blockNumbers[i] = null;
+          blockNumbersDecoded[i] = false;
+        } else {
+          prevAccepted = n;
+        }
       }
     }
   }
@@ -2781,7 +2988,7 @@ ParseResult _parseImpl(
         // line is always a stem start, even when all-caps.
         final allCaps = !RegExp(r'[a-z]').hasMatch(t) &&
             RegExp(r'[A-Z]').hasMatch(t);
-        if (questionStart.hasMatch(t) ||
+        if (isQStart(t) ||
             (!allCaps &&
                 (t.endsWith('?') || t.endsWith('؟') || words >= 4))) {
           stemIdx = i;
@@ -2799,7 +3006,7 @@ ParseResult _parseImpl(
           final allCaps = !RegExp(r'[a-z]').hasMatch(t) &&
               RegExp(r'[A-Z]').hasMatch(t);
           // A numbered line is a question, never furniture.
-          if (questionStart.hasMatch(t) ||
+          if (isQStart(t) ||
               (!allCaps && words > 3) ||
               t.endsWith('?') ||
               t.endsWith('؟')) {
@@ -2837,17 +3044,12 @@ ParseResult _parseImpl(
     // "1947 Was a leap year?" stem already loses its year in the
     // stored text; its number 1947 is recorded the same way.)
     final cleanFirst = _cleanStored(firstLine);
-    final number = _questionNumber(firstLine) ??
-        (isBareNumberQuestionStart(cleanFirst)
-            ? int.tryParse(
-                RegExp(r'^\d+').firstMatch(cleanFirst)!.group(0)!,
-              )
-            : null) ??
-        // Sequence recovery (PPSC-66): a number clipped at the page
-        // edge is recovered from its neighbours above. Never a guess
-        // — [recoveredNumbers] is null unless the run exactly filled
-        // its gap.
-        recoveredNumbers[b];
+    // The block's number — clean digits, OCR-decoded, or
+    // sequence-recovered — was computed and neighbour-validated
+    // before this loop (see the [blockNumbers] pass). A decoded
+    // number that did not fit its neighbours is null here: the block
+    // stays pending and never joins a wrong key entry.
+    final number = blockNumbers[b];
     final page = block.first.page;
     final part = structure?.partForLine(block.first.lineIndex) ?? '';
     // Multi-line question: first line + continuations, and the lines
@@ -3250,7 +3452,16 @@ ParseResult _parseImpl(
     // was footer debris), it must be SKIPPED with a reason, never
     // silently dropped (PakMCQs: 2 footer-answer questions vanished
     // with no trace until this guard).
-    if (!questionStart.hasMatch(firstLine) &&
+    // The numbered check runs on the RAW first line, not the
+    // cleaned one: [_cleanStored] strips the bold marker (U+E000),
+    // so a bold-marked number line ("12. …") would match here and
+    // be counted as skipped, while the baseline (v2.0.3) silently
+    // continues it. The 27 such blocks in Examveda fail to parse
+    // either way (their options are garbled) — the raw form keeps
+    // the diagnostic count at the baseline instead of inflating it
+    // (Examveda 1688→1715, 20 Nov 2026). The bare-number check
+    // below still uses the cleaned line (v2.0.3 behaviour).
+    if (!isQStart(firstLine) &&
         !isBareNumberQuestionStart(cleanFirst)) {
       if (_isForeignScriptNoiseBlock(block)) {
         noiseLinesFiltered += block.length;
@@ -4047,12 +4258,23 @@ bool _hasInlineOptionMarkers(String line) {
   // Abbreviations ending in a–d + '.' ("Sec.", "St.", "No.", "Rs.")
   // are common in option text; a real marker is never glued to the
   // previous word ("Lahore(a)" is not a format these books print).
-  final markerRe =
-      RegExp(r'(?:^|[\s\(,;])\(?\s*([A-Da-d])\s*[\)\.\:]');
+  final markerRe = RegExp(
+    r'(?:^|[\s\(,;])\(?\s*([A-Da-d])\s*[\)\.\:]|(?:^|[\s,;])\(([80])\s*[\)\.\:]',
+  );
   final matches = markerRe.allMatches(line).toList();
   if (matches.length < 2) return null;
   final prefix = line.substring(0, matches[0].start).trim();
-  final letters = matches.map((m) => m.group(1)!.toUpperCase()).toList();
+  // Decode OCR-misread markers (8→B, 0→D) before the consecutiveness
+  // check, so "(A) … (8) … (C) … (D) …" still reads as A–D. The
+  // digit form only ever matches parenthesised ("(8)"): a bare
+  // "8." inside option text (a number, a percentage) must never
+  // fake a marker and break the run — group 2 is the digit marker.
+  final letters = matches
+      .map(
+        (m) =>
+            decodeOcrOptionLetter(m.group(1) ?? m.group(2)!).toUpperCase(),
+      )
+      .toList();
   for (var i = 1; i < letters.length; i++) {
     if (letters[i].codeUnitAt(0) != letters[i - 1].codeUnitAt(0) + 1) {
       return null;
@@ -4500,7 +4722,19 @@ String _stripAnswerTail(String qText, List<String> options) {
   return clean.substring(0, idx).trim();
 }
 
-final _optionRe = RegExp(r'^\(?([A-Da-d])[\)\.\:\-]\s*(.+)$');
+/// An option line. Letters match in any form ("(A)", "A.", "A)").
+/// Misread digits 8/0 match ONLY parenthesised ("(8)", "(0)") — a
+/// bare "8." is a question number (Q8), never an option marker.
+/// With 8/0 in the bare form, every "8."-numbered question looked
+/// like a B option: the flashcard scan bailed out on any block
+/// containing one, and the F3/F8/US History/GSA/Examveda counts
+/// collapsed (20 Nov 2026). The digit form is only ever evidenced
+/// parenthesised in OCR text ("(8)" 15x, "(0)" 26x in Tesseract).
+/// Groups: 1 = letter marker, 2 = letter rest, 3 = digit marker,
+/// 4 = digit rest. The single extraction site reads 2 ?? 4.
+final _optionRe = RegExp(
+  r'^\(?([A-Da-d])[\)\.\:\-]\s*(.+)$|^\(([80])[\)]\s*(.+)$',
+);
 
 /// The 5th option marker (E) — used ONLY inside [_parseStandardBlock]
 /// after A–D are already collected, so a prose "E. coli" is never
@@ -4802,7 +5036,11 @@ String? _finalAnswerValueConflict(
   var rest = m.group(2)!.trim();
   if (rest.isEmpty) return null;
   // Trailing punctuation / OCR junk after the value is not the value.
-  rest = rest.replaceAll(RegExp(r'[^A-Za-z0-9]+$'), '').trim();
+  // Unicode-aware on purpose: an Urdu answer value ends in an
+  // Arabic-script letter, and the old ASCII-only class stripped it
+  // as if it were punctuation. \p{L} keeps every script's letters;
+  // only punctuation, symbols and whitespace are trimmed.
+  rest = rest.replaceAll(RegExp(r'[^\p{L}0-9]+$', unicode: true), '').trim();
   if (rest.isEmpty) return null;
   final lower = rest.toLowerCase();
   if (options[correctIndex].trim().toLowerCase() == lower) return null;
@@ -5155,9 +5393,12 @@ _Standard? _parseStandardBlock(
       // wrapped tail ("actual data (B) …") — join it first.
       final optPrefix = line.substring(0, opt.start).trim();
       if (optPrefix.isNotEmpty) joinContinuation(optPrefix);
-      final o = _extractOption(opt.group(2)!.trim());
+      // Group 2 is the rest for a letter marker, group 4 for a
+      // parenthesised digit marker ("(8)").
+      final optRest = (opt.group(2) ?? opt.group(4))!.trim();
+      final o = _extractOption(optRest);
       options.add(o.text);
-      rawOptions.add(opt.group(2)!.trim());
+      rawOptions.add(optRest);
       boldOptions.add(o.bold);
       if (o.tick || lineTick) tickedIndices.add(options.length - 1);
       if (o.asterisk) asteriskedIndices.add(options.length - 1);

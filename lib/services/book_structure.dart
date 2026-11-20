@@ -366,11 +366,15 @@ bool _isOrgHeading(String text) {
 /// by OCR ("S1." for "51.", "I2." for "12.", "$1." for "51." — the
 /// leading letter/symbol is the misread digit). Clean numbers are
 /// already caught by [_questionStartRe]; this catches the noisy
-/// ones. A real heading never starts with a 1–3 char letter/digit
-/// token + separator ("2021 Current Affairs" has 4 digits + a space,
-/// no separator; "Chapter 3" has no separator after the word).
+/// ones. The leading slot accepts only the question prefix "Q" or a
+/// misread digit (category separation, 20 Nov 2026): an arbitrary
+/// letter ("A12.") is not a number and must not exclude a line from
+/// becoming a title. A real heading never starts with a 1–3 char
+/// letter/digit token + separator ("2021 Current Affairs" has 4
+/// digits + a space, no separator; "Chapter 3" has no separator
+/// after the word).
 final _misreadNumberStartRe = RegExp(
-  r'^[A-Za-z]?[0-9IlOSBZ$§]{1,3}[.\)\:\-]\s',
+  r'^(?:Q|[IiLlOoSsBbZz$§])?[0-9IlOSBZ$§]{1,3}[.\)\:\-]\s',
 );
 
 /// An option marker ANYWHERE in the line ("(A) …", "(B) …" — or the

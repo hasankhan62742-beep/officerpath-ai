@@ -71,6 +71,100 @@ bool hasBoldMarker(String s) => s.contains(boldRunMarker);
 /// Removes every bold-run marker from [s].
 String stripBoldMarkers(String s) => s.replaceAll(boldRunMarker, '');
 
+/// OCR digit confusions in a number token (ML Kit / Tesseract read
+/// 1 as I/l, 0 as O, 5 as S/$/§, 8 as B, 2 as Z — the phone's ML Kit
+/// read "51." as "S1.", 20 Nov 2026). [decodeOcrNumber] maps such a
+/// token back to its number, or null when it cannot be pinned down.
+///
+/// A token must be 1–3 chars when it carries a letter, every char
+/// a digit or a confusable letter, and contain at least one real
+/// digit: a bare letter ("B.", "S.") is a list marker, never a
+/// question number, and a 4+-char letter-bearing token is a word
+/// fragment, never a question number. A token of PURE digits is
+/// exempt from the length cap — big books number past 999 (Examveda
+/// runs to 3212), so "1001." is a real question/key number, and
+/// pure digits cannot be confused with a word. Only letters map to
+/// digits — a digit never maps to another digit — so a decoded
+/// number is determined by position, never guessed.
+int? decodeOcrNumber(String token) {
+  if (token.isEmpty) return null;
+  // Pure digits, any length: a real number, never a misread.
+  if (RegExp(r'^\d+$').hasMatch(token)) {
+    final n = int.tryParse(token);
+    if (n == null || n < 1) return null;
+    return n;
+  }
+  if (token.length > 3) return null;
+  var hasDigit = false;
+  final buf = StringBuffer();
+  for (var i = 0; i < token.length; i++) {
+    final c = token[i];
+    switch (c) {
+      case '0':
+      case '1':
+      case '2':
+      case '3':
+      case '4':
+      case '5':
+      case '6':
+      case '7':
+      case '8':
+      case '9':
+        hasDigit = true;
+        buf.write(c);
+      case 'I':
+      case 'i':
+      case 'l':
+      case 'L':
+        buf.write('1');
+      case 'O':
+      case 'o':
+        buf.write('0');
+      case 'S':
+      case 's':
+      case r'$':
+      case '§':
+        buf.write('5');
+      case 'B':
+      case 'b':
+        buf.write('8');
+      case 'Z':
+      case 'z':
+        buf.write('2');
+      default:
+        return null;
+    }
+  }
+  if (!hasDigit) return null;
+  final n = int.tryParse(buf.toString());
+  if (n == null || n < 1) return null;
+  return n;
+}
+
+/// A question/key number token as OCR may render it, as a regex
+/// pattern: pure digits of ANY length (big books number past 999 —
+/// Examveda runs to 3212), or 1–3 chars, each a digit or a
+/// confusable letter (see [decodeOcrNumber]), with at least one real
+/// digit — written as an alternation because a regex cannot express
+/// "at least one digit" inside a character class. Use wherever a
+/// number is MATCHED (stripping, splitting); the captured token
+/// still goes through [decodeOcrNumber] wherever its VALUE is
+/// needed.
+const ocrNumberTokenPattern =
+    r'(?:\d+|\d[0-9IiLlOoSsBbZz$§]{0,2}|[IiLlOoSsBbZz$§]\d[0-9IiLlOoSsBbZz$§]?|[IiLlOoSsBbZz$§]{2}\d)';
+
+/// Decodes an OCR-misread option letter: 8 is B, 0 is D (Tesseract
+/// on the PPSC-66 pages, 20 Nov 2026: "(0)" 26x, "(8)" 15x — the
+/// option markers (B) and (D) read as digits). Only these two: they
+/// can never be option numbers (options are 1–4), so the decode is
+/// unambiguous. 4 is NOT decoded: it is both a valid option number
+/// (4th option = D) and a misread of A.
+String decodeOcrOptionLetter(String c) {
+  if (c == '8') return 'B';
+  if (c == '0') return 'D';
+  return c;
+}
+
 /// Question-number prefix, shared by the parser's strip and number
 /// extraction: "Q.1:", "Q1.", "Q. 1.", "Q.", "1.", "12)". The old
 /// `Q\s*\d*[\.\)\:]` matched only "Q." of "Q.1:" and left "1: " at the
@@ -82,8 +176,16 @@ String stripBoldMarkers(String s) => s.replaceAll(boldRunMarker, '');
 /// `(?![a-z0-9])` lookahead would reject "3 What …" as well as
 /// "3 apples …". The bare-number strip lives in mcq_parser.dart
 /// ([_stripQuestionNumberPrefix], case-sensitive) instead.
+/// The number token is [ocrNumberTokenPattern], not `\d+`: an
+/// OCR-misread number ("S1.", "I2.") strips exactly like a clean
+/// one, and the ≥1-digit rule in the pattern keeps a bare letter
+/// ("B.", "S.") from ever being stripped.
 final questionPrefixRe = RegExp(
-  r'^(?:Q\s*\.?\s*\d+\s*[\.\)\:]?|Q\s*[\.\)\:]|\d+\s*[\.\)\:])\s*',
+  r'^(?:Q\s*\.?\s*' +
+      ocrNumberTokenPattern +
+      r'\s*[\.\)\:]?|Q\s*[\.\)\:]|' +
+      ocrNumberTokenPattern +
+      r'\s*[\.\)\:])\s*',
   caseSensitive: false,
 );
 
@@ -303,8 +405,14 @@ String? monthHeadingLabel(String line) {
 // letter for 5-option questions (fiveOptionAnswerE), so a key entry
 // "1-E" must be PARSED (and then reported unresolved if the question
 // has only 4 options) rather than silently dropped.
+// The number is [ocrNumberTokenPattern], not `\d+`: an OCR-misread
+// entry number ("S1. (B)" for "51. (B)") is captured and decoded
+// by [parseKeyEntries] via [decodeOcrNumber]; a token with no real
+// digit decodes to null there and is skipped, never guessed.
 final _keyEntryStartRe = RegExp(
-  r'(?:^|\s)(?:Q\s*)?(\d+)\s*[\.\)\:\-,](?=\s|[A-Ea-e]\b|\(|$)',
+  r'(?:^|\s)(?:Q\s*)?(' +
+      ocrNumberTokenPattern +
+      r')\s*[\.\)\:\-,](?=\s|[A-Ea-e]\b|\(|$)',
   caseSensitive: false,
 );
 
@@ -412,10 +520,20 @@ bool _isKeyOnlyLine(String line) {
   // (?=\s|$) after the letter/? — a bare "?" has no word boundary
   // (\b fails after a non-word char at end of string), so \b is
   // wrong here; whitespace-or-end is the right terminator.
-  return RegExp(
-    r'^(?:(?:Q\s*)?\d+\s*[\.\)\:\-]\s*(?:[A-Da-d]|\?)(?=\s|$)\s*)+$',
+  // The number slot is digits only, so a misread token ("S1. C")
+  // counts too — but every token must decode (see
+  // [decodeOcrNumber]): a bare letter ("B. C") is a list marker,
+  // never a key entry. Pure digits run to any length (a key can
+  // number past 999); a letter-bearing token is capped at 3 chars.
+  if (!RegExp(
+    r'^(?:(?:Q\s*)?(?:\d+|[0-9IiLlOoSsBbZz$§]{1,3})\s*[\.\)\:\-]\s*(?:[A-Da-d]|\?)(?=\s|$)\s*)+$',
     caseSensitive: false,
-  ).hasMatch(t);
+  ).hasMatch(t)) {
+    return false;
+  }
+  return RegExp(
+    r'(?:Q\s*)?(\d+|[0-9IiLlOoSsBbZz$§]{1,3})\s*[\.\)\:\-]',
+  ).allMatches(t).every((m) => decodeOcrNumber(m.group(1)!) != null);
 }
 
 String _normalisePaperLabel(String kind, String id) {
@@ -569,7 +687,10 @@ Map<int, String> parseKeyEntries(String blob) {
   final entries = <int, String>{};
   final starts = _keyEntryStartRe.allMatches(blob).toList();
   for (var i = 0; i < starts.length; i++) {
-    final number = int.tryParse(starts[i].group(1)!);
+    // The entry number may be OCR-misread ("S1." for "51."): decode
+    // it; a token with no real digit (a bare letter) decodes to null
+    // and is skipped, never guessed.
+    final number = decodeOcrNumber(starts[i].group(1)!);
     if (number == null) continue;
     final valueStart = starts[i].end;
     final valueEnd = i + 1 < starts.length ? starts[i + 1].start : blob.length;
@@ -760,6 +881,16 @@ SegmentedText segmentLines(List<SegmentedLine> lines) {
   );
 }
 
+/// An OCR-misread answer letter as an option index: 8 is B (index 1),
+/// 0 is D (index 3) — see [decodeOcrOptionLetter]. Null for a real
+/// letter or digit. Used wherever an answer token's letter is
+/// resolved, so a key entry "(8)" still answers its question.
+int? _misreadAnswerLetterIndex(String c) {
+  final decoded = decodeOcrOptionLetter(c);
+  if (decoded == c) return null;
+  return decoded.codeUnitAt(0) - 65;
+}
+
 /// Resolves an answer token to an option index: a letter (C), a number
 /// (3), the option's own text ("Islamabad"), or a letter plus the text
 /// ("B) Asif Ali Zardari" — the letter wins, the text is the fallback).
@@ -773,21 +904,26 @@ int? resolveAnswerToken(String token, List<String> options) {
   // "Option C" (Examveda "Answer: Option X"): the word "Option" + a
   // letter. Resolve by the letter. A–E (not just A–D): a 5-option
   // question's answer can be E — the single-letter bounds check
-  // below rejects E for a 4-option question.
+  // below rejects E for a 4-option question. 8/0 are OCR-misread
+  // letters (B/D) — see [_misreadAnswerLetterIndex].
   final optionLetter = RegExp(
-    r'^option\s+([A-Ea-e1-5])\b',
+    r'^option\s+([A-Ea-e1-580])\b',
     caseSensitive: false,
   ).firstMatch(t);
   if (optionLetter != null) {
+    final misread = _misreadAnswerLetterIndex(optionLetter.group(1)!);
+    if (misread != null && misread < options.length) return misread;
     return resolveAnswerToken(optionLetter.group(1)!, options);
   }
   // "(C) 80" / "(C)80": letter in parens, then an optional value.
   // The paren makes it unambiguous (not a decimal like "3.14"), so
   // the space after the paren is optional — OCR drops it.
   final parenLetter = RegExp(
-    r'^[\(\[]\s*([A-Ea-e1-5])\s*[\)\]]\s*(.*)$',
+    r'^[\(\[]\s*([A-Ea-e1-580])\s*[\)\]]\s*(.*)$',
   ).firstMatch(t);
   if (parenLetter != null) {
+    final misread = _misreadAnswerLetterIndex(parenLetter.group(1)!);
+    if (misread != null && misread < options.length) return misread;
     final byLetter = resolveAnswerToken(parenLetter.group(1)!, options);
     if (byLetter != null) return byLetter;
     final rest = parenLetter.group(2)!;
@@ -798,9 +934,11 @@ int? resolveAnswerToken(String token, List<String> options) {
   // "B) Asif Ali Zardari" / "2. Paris": letter-or-number, then text.
   // A–E: a 5-option question's answer can be E.
   final letterText = RegExp(
-    r'^\(?([A-Ea-e1-5])[\)\.\:\-]\s+(.+)$',
+    r'^\(?([A-Ea-e1-580])[\)\.\:\-]\s+(.+)$',
   ).firstMatch(stripped);
   if (letterText != null) {
+    final misread = _misreadAnswerLetterIndex(letterText.group(1)!);
+    if (misread != null && misread < options.length) return misread;
     final byLetter = resolveAnswerToken(letterText.group(1)!, options);
     if (byLetter != null) return byLetter;
     return resolveAnswerToken(letterText.group(2)!, options);
@@ -817,6 +955,11 @@ int? resolveAnswerToken(String token, List<String> options) {
   for (var i = 0; i < options.length; i++) {
     if (options[i].trim().toLowerCase() == lower) return i;
   }
+  // A bare misread letter ("8", "0" — the parens were dropped by OCR
+  // too): only after the text match above, so a real numeric answer
+  // ("8" as an option value) still wins.
+  final misread = _misreadAnswerLetterIndex(stripped);
+  if (misread != null && misread < options.length) return misread;
   return null;
 }
 
