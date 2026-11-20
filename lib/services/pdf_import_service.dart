@@ -237,13 +237,21 @@ class PdfImportService {
       pageTexts[p['page'] as int] = p['text'] as String;
     }
     var pageCount = pageTexts.length;
-    // Pages that had a readable text layer — counted BEFORE OCR runs,
-    // so the number means what it says even after OCR fills the gaps.
-    final textPages = pageTexts.values
-        .where((t) => t.trim().isNotEmpty)
-        .length;
+    // A page counts as a text page ONLY when its text layer is real
+    // content: enough words to be a question page, and not the same
+    // short stamp repeated on most pages (a scanner watermark or a
+    // running header). No watermark word is named — the rule is
+    // word-count + repetition only, so it holds for any stamp text.
+    // A watermark-only page (1–2 words) or a repeated stamp goes to
+    // OCR exactly like an empty page: a watermark must never be the
+    // reason OCR does not run. Pages are counted BEFORE OCR runs, so
+    // the number means what it says even after OCR fills the gaps.
+    final stamps = stampPages(pageTexts);
+    bool isTextPage(MapEntry<int, String> e) =>
+        pageTextIsContent(e.value) && !stamps.contains(e.key);
+    final textPages = pageTexts.entries.where(isTextPage).length;
     var ocrTargets = pageTexts.entries
-        .where((e) => e.value.trim().isEmpty)
+        .where((e) => !isTextPage(e))
         .map((e) => e.key)
         .toList();
 
@@ -681,6 +689,53 @@ class PdfImportService {
   /// page was actually read.
   static int _wordCount(String text) =>
       text.split(RegExp(r'\s+')).where((w) => w.trim().isNotEmpty).length;
+
+  /// Minimum words for a page's text layer to count as real content.
+  /// A scanned page's text layer is typically a one-word stamp per
+  /// page; a genuine question page carries a stem plus four options
+  /// (~15+ words even for a single short MCQ), so 10 keeps every
+  /// complete question page as text while watermark/header-only
+  /// pages go to OCR. A page with only a short stem fragment
+  /// (options on the next page) can fall below the bar — OCR then
+  /// re-reads the same words off the rendered page, so the cost is
+  /// one extra OCR pass, never a lost question.
+  static const int minTextLayerWords = 10;
+
+  /// Whether one page's extracted text looks like real content
+  /// rather than a stamp: at least [minTextLayerWords] words.
+  /// Generic — no watermark word is named anywhere.
+  static bool pageTextIsContent(String text) =>
+      _wordCount(text) >= minTextLayerWords;
+
+  /// Pages whose whole text layer is the SAME short text on most
+  /// pages of the document — a running header/footer or a scanner
+  /// stamp repeated verbatim on every page. The rule is repetition
+  /// + brevity only (same text on at least 3 pages and at least half
+  /// the document, under 50 words); no stamp text is named, so it
+  /// holds for any watermark. A genuine question page is never
+  /// identical to most other pages, and a full page of questions is
+  /// far longer than 50 words, so a real page cannot trip this.
+  /// Returns the 1-based page numbers that are stamps.
+  static Set<int> stampPages(Map<int, String> pageTexts) {
+    if (pageTexts.length < 3) return {};
+    final counts = <String, int>{};
+    for (final t in pageTexts.values) {
+      final key = t.trim().toLowerCase();
+      if (key.isEmpty) continue;
+      counts[key] = (counts[key] ?? 0) + 1;
+    }
+    final stamped = <int>{};
+    for (final e in pageTexts.entries) {
+      final key = e.value.trim().toLowerCase();
+      final n = counts[key] ?? 0;
+      if (n >= 3 &&
+          n * 2 >= pageTexts.length &&
+          _wordCount(e.value) < 50) {
+        stamped.add(e.key);
+      }
+    }
+    return stamped;
+  }
 
   /// Imports a .docx MCQ bank (v1.2, steer 18): the document is a ZIP
   /// of XML — `word/document.xml` is read in a background isolate
