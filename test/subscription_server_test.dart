@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:officerpath_ai/services/secure_key_store.dart';
 import 'package:officerpath_ai/services/subscription_service.dart';
 
 void main() {
@@ -10,6 +11,9 @@ void main() {
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     await sub.resetForTest();
+    // Premium cache lives in secure storage — inject the in-memory
+    // fake (see subscription_test.dart).
+    sub.secureStoreOverride = InMemorySecureStore();
     // Tests pass no --dart-define, so SupabaseConfig.isConfigured is
     // false; the override seam lets the fake server answer anyway.
     sub.isConfiguredOverride = () => true;
@@ -168,6 +172,37 @@ void main() {
         DateTime.now().subtract(const Duration(days: 1)),
       );
       expect(await sub.isPremium(), isFalse);
+    });
+  });
+
+  group('legacy SharedPreferences premium cache migrates once', () {
+    test('v1 prefs keys move to secure storage, then disappear',
+        () async {
+      // Simulate a user upgrading from a build that cached Premium
+      // in SharedPreferences (legacy key names, seeded after setUp
+      // so resetForTest cannot wipe them first).
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('is_premium_v1', true);
+      await prefs.setString('premium_plan_id_v1', 'premium_2months');
+      await prefs.setString(
+        'premium_until_iso_v1',
+        DateTime.now().add(const Duration(days: 60)).toIso8601String(),
+      );
+      expect(await sub.isPremium(), isTrue);
+      expect(await sub.currentPlanId(), 'premium_2months');
+      // No premium state remains in SharedPreferences afterwards.
+      expect(prefs.getBool('is_premium_v1'), isNull);
+      expect(prefs.getString('premium_plan_id_v1'), isNull);
+      expect(prefs.getString('premium_until_iso_v1'), isNull);
+      // ...and the grant survived in the secure store.
+      expect(await sub.isPremium(), isTrue);
+    });
+
+    test('legacy free flag migrates to not-premium', () async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('is_premium_v1', false);
+      expect(await sub.isPremium(), isFalse);
+      expect(prefs.getBool('is_premium_v1'), isNull);
     });
   });
 

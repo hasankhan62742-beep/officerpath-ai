@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'secure_key_store.dart';
 import 'supabase_config.dart';
 
 /// Fetches one `profiles` row for [userId]: `{'plan': 'free'|'premium',
@@ -43,21 +44,25 @@ typedef ServerTestResultInserter =
 ///     month than the 2-month plan; vs Pak Imtehan Rs 5,900/yr and
 ///     MockCSS Rs 2,000/mo, these prices undercut both competitors.)
 ///
-/// PAYMENT in v1 is MANUAL (JazzCash / Easypaisa / bank transfer + owner
-/// activation code) — see manual_activation.dart. Google Play Billing is
-/// NOT wired in v1; it is a stub for the later Play Store phase
+/// PAYMENT in v2 is MANUAL (JazzCash / Easypaisa / bank transfer +
+/// payment proof) with SERVER-SIDE single-use activation codes
+/// ([ActivationService.redeemCode]). Google Play Billing is NOT wired
+/// yet; it is a stub for the later Play Store phase
 /// (billing_service.dart). No money moves through this service directly.
+///
+/// The v1 offline-code path (`ManualActivationService`, FNV-1a codes
+/// minted from a compiled-in secret) was DELETED with the v2.0.0
+/// security audit (L3, 2026-11-20): the default secret was public in
+/// the repo, so anyone could forge codes offline. There is no offline
+/// grant path left — Premium comes only from the server.
 ///
 /// v2.0 — SERVER SOURCE OF TRUTH: the plan now lives in the server
 /// `profiles` row (`plan` + `premium_until`) and is fetched by
-/// [refreshPlanFromServer] whenever the app is online. The
-/// SharedPreferences cache below is only the OFFLINE fallback, so
-/// `isPremium` / `testsRemaining` keep working with no connection.
-/// After a successful code redemption the caller applies the grant
-/// with [applyServerPremium] (which writes the same cache). The old
-/// offline-code path ([ManualActivationService.activateWithCode]) is
-/// v1-only and deprecated — it still writes this cache, but the
-/// Upgrade screen no longer calls it.
+/// [refreshPlanFromServer] whenever the app is online. The secure
+/// cache below is only the OFFLINE fallback, so `isPremium` /
+/// `testsRemaining` keep working with no connection. After a
+/// successful code redemption the caller applies the grant with
+/// [applyServerPremium] (which writes the same cache).
 ///
 /// NOTE on Play fees (for the owner, not shown as a promise to users):
 /// Google Play takes a ~15% service fee on subscriptions under the
@@ -162,9 +167,25 @@ class SubscriptionService {
   // a user upgrading to v2 starts the new month at 0).
   static const _kTestsUsedMonth = 'free_tests_month_v2';
   static const _kTestsUsedMonthCount = 'free_tests_used_month_v2';
-  static const _kIsPremium = 'is_premium_v1';
-  static const _kPlanId = 'premium_plan_id_v1';
-  static const _kPremiumUntil = 'premium_until_iso_v1';
+  // Premium cache — SECURE STORAGE ONLY (audit L8, fixed 2026-11-20):
+  // the plan/premium state used to live in plaintext
+  // SharedPreferences, where a rooted device could flip it offline.
+  // It now lives in flutter_secure_storage via [SecureStore]
+  // (Android Keystore), following the Gemini-key pattern in
+  // secure_key_store.dart. Key names follow that file's `<name>_vN`
+  // convention. The free-test counter below stays in
+  // SharedPreferences — it is usage accounting, not entitlement.
+  static const _kIsPremium = 'premium_is_active_v2';
+  static const _kPlanId = 'premium_plan_id_v2';
+  static const _kPremiumUntil = 'premium_until_iso_v2';
+
+  // Legacy v1/v2.0.0-pre-fix SharedPreferences keys, read ONLY by the
+  // one-time migration in [_migrateLegacyPremiumCache] (users
+  // upgrading from a build that cached Premium in prefs keep their
+  // grant; the keys are deleted after the copy). Never written.
+  static const _kLegacyIsPremium = 'is_premium_v1';
+  static const _kLegacyPlanId = 'premium_plan_id_v1';
+  static const _kLegacyPremiumUntil = 'premium_until_iso_v1';
 
   /// Test seam: when set, [refreshPlanFromServer] calls this instead
   /// of the Supabase `profiles` table. Production leaves it null.
@@ -191,6 +212,46 @@ class SubscriptionService {
   /// of inserting into Supabase. Production leaves it null. Cleared
   /// by [resetForTest].
   ServerTestResultInserter? serverTestResultInserter;
+
+  /// Test seam: when set, the premium cache reads/writes this store
+  /// instead of platform secure storage. Production leaves it null
+  /// (→ [PlatformSecureStore]). Cleared by [resetForTest]. Tests
+  /// pass an [InMemorySecureStore] so no platform channel is needed.
+  SecureStore? secureStoreOverride;
+
+  SecureStore get _secureStore =>
+      secureStoreOverride ?? PlatformSecureStore();
+
+  /// One-time migration for users upgrading from a build that cached
+  /// premium state in SharedPreferences (v1 / v2.0.0 pre-fix): when
+  /// the secure store holds nothing but the legacy prefs keys exist,
+  /// copy them over and delete the legacy keys, so no premium state
+  /// remains in SharedPreferences afterwards. A no-op (one cheap
+  /// prefs read) once the legacy keys are gone.
+  Future<void> _migrateLegacyPremiumCache() async {
+    if (await _secureStore.read(_kIsPremium) != null) return;
+    final prefs = await SharedPreferences.getInstance();
+    final legacyActive = prefs.getBool(_kLegacyIsPremium);
+    final legacyPlanId = prefs.getString(_kLegacyPlanId);
+    final legacyUntil = prefs.getString(_kLegacyPremiumUntil);
+    if (legacyActive == null &&
+        legacyPlanId == null &&
+        legacyUntil == null) {
+      return;
+    }
+    if (legacyActive == true) {
+      await _secureStore.write(_kIsPremium, 'true');
+    }
+    if (legacyPlanId != null) {
+      await _secureStore.write(_kPlanId, legacyPlanId);
+    }
+    if (legacyUntil != null) {
+      await _secureStore.write(_kPremiumUntil, legacyUntil);
+    }
+    await prefs.remove(_kLegacyIsPremium);
+    await prefs.remove(_kLegacyPlanId);
+    await prefs.remove(_kLegacyPremiumUntil);
+  }
 
   bool _isConfigured() =>
       isConfiguredOverride?.call() ?? SupabaseConfig.isConfigured;
@@ -344,27 +405,30 @@ class SubscriptionService {
     DateTime? premiumUntil, {
     int? months,
   }) async {
-    final prefs = await SharedPreferences.getInstance();
+    await _migrateLegacyPremiumCache();
     if (!isServerPremium(plan, premiumUntil)) {
-      await prefs.setBool(_kIsPremium, false);
-      await prefs.remove(_kPlanId);
-      await prefs.remove(_kPremiumUntil);
+      await _secureStore.write(_kIsPremium, 'false');
+      await _secureStore.delete(_kPlanId);
+      await _secureStore.delete(_kPremiumUntil);
       return;
     }
     final planId =
         planIdForServerPlan(plan, premiumUntil, months: months) ??
         'premium_1month';
-    await prefs.setBool(_kIsPremium, true);
-    await prefs.setString(_kPlanId, planId);
-    await prefs.setString(_kPremiumUntil, premiumUntil!.toIso8601String());
+    await _secureStore.write(_kIsPremium, 'true');
+    await _secureStore.write(_kPlanId, planId);
+    await _secureStore.write(
+      _kPremiumUntil,
+      premiumUntil!.toIso8601String(),
+    );
   }
 
   /// Cached premium expiry (null when Free / never granted). The
   /// stored value may be past — [isPremium] is the authority on
   /// whether Premium is active.
   Future<DateTime?> premiumUntil() async {
-    final prefs = await SharedPreferences.getInstance();
-    final until = prefs.getString(_kPremiumUntil);
+    await _migrateLegacyPremiumCache();
+    final until = await _secureStore.read(_kPremiumUntil);
     return until == null ? null : DateTime.tryParse(until);
   }
 
@@ -482,13 +546,13 @@ class SubscriptionService {
 
   /// Premium is time-bound. An expired plan falls back to Free.
   Future<bool> isPremium() async {
-    final prefs = await SharedPreferences.getInstance();
-    if (prefs.getBool(_kIsPremium) != true) return false;
-    final until = prefs.getString(_kPremiumUntil);
+    await _migrateLegacyPremiumCache();
+    if (await _secureStore.read(_kIsPremium) != 'true') return false;
+    final until = await _secureStore.read(_kPremiumUntil);
     if (until == null) return false;
     final expiry = DateTime.tryParse(until);
     if (expiry == null || DateTime.now().isAfter(expiry)) {
-      await prefs.setBool(_kIsPremium, false);
+      await _secureStore.write(_kIsPremium, 'false');
       return false;
     }
     return true;
@@ -496,8 +560,7 @@ class SubscriptionService {
 
   Future<String?> currentPlanId() async {
     if (!await isPremium()) return null;
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_kPlanId);
+    return _secureStore.read(_kPlanId);
   }
 
   /// True when the user may add another of their own books.
@@ -507,33 +570,31 @@ class SubscriptionService {
     return customBookCount < freeBookLimit;
   }
 
-  /// Called ONLY by the billing layer after a verified Play purchase.
-  /// Never call this from UI code directly.
-  Future<void> grantPremium(PremiumPlan plan) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_kIsPremium, true);
-    await prefs.setString(_kPlanId, plan.id);
-    await prefs.setString(
-      _kPremiumUntil,
-      DateTime.now()
-          .add(Duration(days: plan.durationDays))
-          .toIso8601String(),
-    );
-  }
-
   /// Test/dev helper: clears the entitlement (used by unit tests only).
+  /// Also clears any legacy SharedPreferences premium keys, so a test
+  /// never inherits premium state from the old plaintext cache.
   Future<void> resetForTest() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_kTestsUsed);
     await prefs.remove(_kTestsUsedMonth);
     await prefs.remove(_kTestsUsedMonthCount);
-    await prefs.remove(_kIsPremium);
-    await prefs.remove(_kPlanId);
-    await prefs.remove(_kPremiumUntil);
+    await prefs.remove(_kLegacyIsPremium);
+    await prefs.remove(_kLegacyPlanId);
+    await prefs.remove(_kLegacyPremiumUntil);
+    // The secure store is deleted only when a test injected one;
+    // with no override (production) there is nothing to clear here
+    // and touching the platform store from a test would throw.
+    final store = secureStoreOverride;
+    if (store != null) {
+      await store.delete(_kIsPremium);
+      await store.delete(_kPlanId);
+      await store.delete(_kPremiumUntil);
+    }
     serverProfileFetcher = null;
     serverMonthlyTestCountFetcher = null;
     serverTestResultInserter = null;
     currentUserIdOverride = null;
     isConfiguredOverride = null;
+    secureStoreOverride = null;
   }
 }

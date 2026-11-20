@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:officerpath_ai/services/secure_key_store.dart';
 import 'package:officerpath_ai/services/subscription_service.dart';
 
 /// Free tests, v2.0.0 — 3 PER CALENDAR MONTH (user decision 19 Nov 2026),
@@ -15,6 +16,10 @@ void main() {
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     await SubscriptionService.instance.resetForTest();
+    // Premium cache lives in secure storage — inject the in-memory
+    // fake (see subscription_test.dart).
+    SubscriptionService.instance.secureStoreOverride =
+        InMemorySecureStore();
   });
 
   test('monthKeyFor / monthStartFor', () {
@@ -60,7 +65,10 @@ void main() {
 
   test('premium never consumes the monthly counter', () async {
     final sub = SubscriptionService.instance;
-    await sub.grantPremium(PremiumPlan.plans[0]);
+    await sub.applyServerPremium(
+      'premium_1month',
+      DateTime.now().add(const Duration(days: 30)),
+    );
     await sub.recordTestGenerated(now: DateTime(2026, 11, 10));
     expect(await sub.testsUsed(now: DateTime(2026, 11, 10)), 0);
   });

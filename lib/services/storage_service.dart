@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
@@ -24,19 +25,26 @@ class StorageService {
   // transparency). onUpgrade adds them to v1 installs; no data loss.
   // v3 (1.2): the attempts table gains `book_title` — the book the
   // test was drawn from — so history folders are truly per-book.
-  static const _dbVersion = 3;
+  // v4 (2.0.1): questions gain answer_verified / confidence /
+  // mark_provenance / original_correct_index (verification tracking,
+  // added to Question.toMap in v1.3 but NEVER added to this schema —
+  // every save of a parsed question crashed on device with
+  // "table questions has no column named answer_verified", found by
+  // the owner's phone test 20 Nov 2026). onUpgrade adds them to
+  // existing installs; no data loss.
+  static const _dbVersion = 4;
   static const _seedFlag = 'sample_bank_seeded_v1';
 
   Database? _db;
 
-  Future<Database> get _database async {
-    if (_db != null) return _db!;
-    final dir = await getDatabasesPath();
-    _db = await openDatabase(
-      p.join(dir, _dbName),
-      version: _dbVersion,
-      onCreate: (db, version) async {
-        await db.execute('''
+  /// Creates the full current schema. Extracted from the [openDatabase]
+  /// onCreate callback so tests can drive the real schema on a real
+  /// (ffi) database — see test/storage_schema_test.dart. Keep this and
+  /// [upgradeSchema] in sync: every column here must also be added by
+  /// [upgradeSchema] for older versions.
+  @visibleForTesting
+  static Future<void> createSchema(Database db, int version) async {
+    await db.execute('''
           CREATE TABLE sources(
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
@@ -46,7 +54,7 @@ class StorageService {
             is_built_in INTEGER NOT NULL DEFAULT 0
           )
         ''');
-        await db.execute('''
+    await db.execute('''
           CREATE TABLE questions(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             text TEXT NOT NULL,
@@ -62,13 +70,17 @@ class StorageService {
             page INTEGER NOT NULL DEFAULT 0,
             part TEXT NOT NULL DEFAULT '',
             answer_source TEXT NOT NULL DEFAULT '',
+            answer_verified INTEGER NOT NULL DEFAULT 0,
+            confidence REAL NOT NULL DEFAULT 0,
+            mark_provenance TEXT NOT NULL DEFAULT '',
+            original_correct_index INTEGER,
             bold_options TEXT NOT NULL DEFAULT ''
           )
         ''');
-        await db.execute(
-          'CREATE INDEX idx_questions_source ON questions(source_id)',
-        );
-        await db.execute('''
+    await db.execute(
+      'CREATE INDEX idx_questions_source ON questions(source_id)',
+    );
+    await db.execute('''
           CREATE TABLE attempts(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             exam_id TEXT NOT NULL,
@@ -87,32 +99,67 @@ class StorageService {
             wrong_question_ids_json TEXT NOT NULL DEFAULT '[]'
           )
         ''');
-      },
-      // v1 → v2: add the page/part/signal columns to existing installs.
-      // ADD COLUMN with a DEFAULT is safe on a populated table; the
-      // old rows simply read back page 0 / part '' / source ''.
-      // v2 → v3: add `book_title` to attempts (old rows read back '').
-      onUpgrade: (db, oldVersion, newVersion) async {
-        if (oldVersion < 2) {
-          await db.execute(
-            'ALTER TABLE questions ADD COLUMN page INTEGER NOT NULL DEFAULT 0',
-          );
-          await db.execute(
-            "ALTER TABLE questions ADD COLUMN part TEXT NOT NULL DEFAULT ''",
-          );
-          await db.execute(
-            "ALTER TABLE questions ADD COLUMN answer_source TEXT NOT NULL DEFAULT ''",
-          );
-          await db.execute(
-            "ALTER TABLE questions ADD COLUMN bold_options TEXT NOT NULL DEFAULT ''",
-          );
-        }
-        if (oldVersion < 3) {
-          await db.execute(
-            "ALTER TABLE attempts ADD COLUMN book_title TEXT NOT NULL DEFAULT ''",
-          );
-        }
-      },
+  }
+
+  /// Migrates an older database to the current schema. Extracted from
+  /// the [openDatabase] onUpgrade callback so tests can drive the real
+  /// upgrade path — see test/storage_schema_test.dart.
+  @visibleForTesting
+  static Future<void> upgradeSchema(
+    Database db,
+    int oldVersion,
+    int newVersion,
+  ) async {
+    // v1 → v2: add the page/part/signal columns to existing installs.
+    // ADD COLUMN with a DEFAULT is safe on a populated table; the
+    // old rows simply read back page 0 / part '' / source ''.
+    // v2 → v3: add `book_title` to attempts (old rows read back '').
+    // v3 → v4: add the verification-tracking columns to questions
+    // (old rows read back unverified / 0 confidence, as fromMap
+    // already derives for rows written before v1.3).
+    if (oldVersion < 2) {
+      await db.execute(
+        'ALTER TABLE questions ADD COLUMN page INTEGER NOT NULL DEFAULT 0',
+      );
+      await db.execute(
+        "ALTER TABLE questions ADD COLUMN part TEXT NOT NULL DEFAULT ''",
+      );
+      await db.execute(
+        "ALTER TABLE questions ADD COLUMN answer_source TEXT NOT NULL DEFAULT ''",
+      );
+      await db.execute(
+        "ALTER TABLE questions ADD COLUMN bold_options TEXT NOT NULL DEFAULT ''",
+      );
+    }
+    if (oldVersion < 3) {
+      await db.execute(
+        "ALTER TABLE attempts ADD COLUMN book_title TEXT NOT NULL DEFAULT ''",
+      );
+    }
+    if (oldVersion < 4) {
+      await db.execute(
+        'ALTER TABLE questions ADD COLUMN answer_verified INTEGER NOT NULL DEFAULT 0',
+      );
+      await db.execute(
+        'ALTER TABLE questions ADD COLUMN confidence REAL NOT NULL DEFAULT 0',
+      );
+      await db.execute(
+        "ALTER TABLE questions ADD COLUMN mark_provenance TEXT NOT NULL DEFAULT ''",
+      );
+      await db.execute(
+        'ALTER TABLE questions ADD COLUMN original_correct_index INTEGER',
+      );
+    }
+  }
+
+  Future<Database> get _database async {
+    if (_db != null) return _db!;
+    final dir = await getDatabasesPath();
+    _db = await openDatabase(
+      p.join(dir, _dbName),
+      version: _dbVersion,
+      onCreate: createSchema,
+      onUpgrade: upgradeSchema,
     );
     return _db!;
   }

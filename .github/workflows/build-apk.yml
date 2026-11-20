@@ -1,10 +1,12 @@
-# OfficerPath AI — build the arm64 debug APK and attach it to the GitHub Release.
+# OfficerPath AI — build the arm64 RELEASE APK and attach it to the GitHub Release.
 #
 # Why CI exists: the app is distributed as a sideloaded APK via GitHub
-# Releases (NOT the Play Store). Every release needs exactly one asset,
-# officerpath-ai-<version>-arm64.apk, because the in-app updater
+# Releases (NOT the Play Store). Every release needs two assets,
+# officerpath-ai-<version>-arm64.apk and its SHA-256 sidecar
+# officerpath-ai-<version>-arm64.apk.sha256, because the in-app updater
 # (lib/services/app_update_service.dart) looks for the `-arm64.apk` asset
-# on the latest release. Building it by hand on a VM is slow and fragile
+# on the latest release and verifies it against the sidecar before
+# installing (M3). Building it by hand on a VM is slow and fragile
 # (see the proxy/quirk notes in README.md), so the release build is
 # automated here.
 #
@@ -17,10 +19,15 @@
 #
 # Toolchain (pinned to the versions verified on the build VM, 19 Nov 2026):
 #   Flutter 3.35.7, JDK 17 (Temurin), Android SDK platform 35.
-# No keystore / signing config: the owner's release keystore does not
-# exist yet, so this builds DEBUG. A release-key build cannot install
-# over the debug-signed v1.2.0 anyway (same-signing-key rule), so debug
-# is the correct ship target until the keystore exists.
+# Release signing: the permanent keystore (created 20 Nov 2026, alias
+# officerpath, RSA 2048, valid to 2054) is stored ONLY as repo secrets
+# (ANDROID_KEYSTORE_BASE64 + KEYSTORE_PASSWORD + KEY_ALIAS +
+# KEY_PASSWORD). The workflow decodes it and writes
+# android/key.properties before the build, so this builds RELEASE.
+# A release-key build cannot install over the debug-signed v1.2.0 or
+# v2.0.0 (same-signing-key rule) — those users uninstall once and
+# reinstall v2.0.1; every later release-signed build installs over
+# v2.0.1 normally, and the in-app updater can update them.
 #
 # No proxy handling: the VM's Gradle builds needed a proxy password
 # refresh (egress MITM CA + proxy auth). GitHub-hosted runners have
@@ -51,11 +58,11 @@ jobs:
     steps:
       # (a) Check out the tagged commit / release commit.
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # (b) JDK 17 — what the Android Gradle plugin in this project needs.
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: '17'
@@ -63,7 +70,7 @@ jobs:
       # (c) Flutter 3.35.7 — the version the app was verified against
       # (pubspec requires Flutter >= 3.35.0; Dart 3.9.2).
       - name: Set up Flutter 3.35.7
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: '3.35.7'
           channel: stable
@@ -80,7 +87,34 @@ jobs:
       - name: flutter test
         run: flutter test
 
-      # (g) Build ONLY the arm64 debug APK.
+      # (g0) Prepare the permanent release signing key.
+      #
+      # The release keystore lives ONLY as the ANDROID_KEYSTORE_BASE64
+      # repo secret (base64 of the keystore file) plus the three
+      # password/alias secrets. It is decoded here, in the runner,
+      # and written to android/key.properties, which
+      # android/app/build.gradle.kts reads for the release signing
+      # config. Nothing here is committed: the keystore file and
+      # key.properties are created fresh on every run and never enter
+      # the repo (both are git-ignored). GitHub Actions masks secret
+      # values in logs, so they never appear in the build log.
+      - name: Prepare release signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/officerpath-release.keystore
+          cat > android/key.properties <<EOF
+          storePassword=$KEYSTORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=$GITHUB_WORKSPACE/android/app/officerpath-release.keystore
+          EOF
+          ls -l android/app/officerpath-release.keystore android/key.properties
+
+      # (g) Build ONLY the arm64 release APK.
       #
       # Supabase config comes ONLY from --dart-define (see
       # lib/services/supabase_config.dart): without these two flags the
@@ -89,24 +123,20 @@ jobs:
       # SUPABASE_URL and SUPABASE_ANON_KEY repository secrets.
       #
       # WHY --split-per-abi (and NOT --target-platform android-arm64):
-      # `flutter build apk --debug --target-platform android-arm64` does
-      # NOT isolate arm64 in debug mode — the flag is ignored for debug
-      # builds (flutter/flutter#153359) and produces a FAT app-debug.apk
-      # with all ABIs. Verified on this project's own VM, 19 Nov 2026:
-      #   --target-platform android-arm64 --debug -> app-debug.apk,
-      #     151,345,632 bytes (fat, all ABIs)
-      #   --split-per-abi --debug -> app-arm64-v8a-debug.apk,
-      #     119,172,927 bytes — exactly the size of the live v1.2.0
-      #     release asset, i.e. the file users actually installed.
-      # So: build split-per-abi and pick the arm64 file in the next step.
+      # `flutter build apk --release --target-platform android-arm64`
+      # produces the arm64 APK, but --split-per-abi is kept for the
+      # same naming the updater expects (app-arm64-v8a-release.apk).
       # NOTE: split-per-abi adds ABI*1000 to the version code (arm64 = 2),
-      # so the arm64 APK's versionCode is 5000 + 2000 = 7000, not the
-      # pubspec's 5000. That is still > the live v1.2.0 (4002), so it
-      # installs over it. The updater compares the tag string, not the
-      # version code, so this does not affect in-app updates.
-      - name: Build arm64 debug APK
+      # so the arm64 APK's versionCode is 5100 + 2000 = 7100, not the
+      # pubspec's 5100. That is > v2.0.0's 7000, so the version code
+      # alone would allow installing over v2.0.0 — but the SIGNING KEY
+      # differs (v2.0.0 was debug-signed), so Android still refuses
+      # and the one-time uninstall/reinstall is required. The updater
+      # compares the tag string, not the version code, so this does
+      # not affect in-app updates.
+      - name: Build arm64 release APK
         run: |
-          flutter build apk --debug --split-per-abi \
+          flutter build apk --release --split-per-abi \
             --dart-define=SUPABASE_URL=${{ secrets.SUPABASE_URL }} \
             --dart-define=SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
 
@@ -117,26 +147,38 @@ jobs:
         run: |
           TAG="${{ github.ref_name }}"
           VERSION="${TAG#v}"
-          SRC="build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk"
+          SRC="build/app/outputs/flutter-apk/app-arm64-v8a-release.apk"
           DEST="officerpath-ai-${VERSION}-arm64.apk"
           test -f "$SRC" || { echo "ERROR: expected APK not found: $SRC"; ls -l build/app/outputs/flutter-apk/; exit 1; }
           cp "$SRC" "$DEST"
           ls -lh "$DEST"
 
+      # (h2) SHA-256 sidecar for the updater (M3): the app fetches
+      # officerpath-ai-<version>-arm64.apk.sha256 from the release,
+      # verifies the downloaded APK against it, and refuses to install
+      # on mismatch. `sha256sum` writes "<hash>  <filename>".
+      - name: Compute SHA-256 of the APK
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          sha256sum "officerpath-ai-${VERSION}-arm64.apk" > "officerpath-ai-${VERSION}-arm64.apk.sha256"
+          cat "officerpath-ai-${VERSION}-arm64.apk.sha256"
+
       # Keep the APK as a workflow artifact on every run, so a tag-push
       # run (which has no release to attach to) still leaves a
       # downloadable APK behind.
       - name: Upload APK as workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: officerpath-ai-${{ github.ref_name }}-arm64-apk
           path: officerpath-ai-*.apk
           if-no-files-found: error
 
-      # (i) Attach the APK to the GitHub Release. Runs ONLY on the
-      # release-published trigger: on a bare tag push no release exists
-      # yet, so `gh release upload` would fail. --clobber replaces the
-      # asset if the workflow is ever re-run for the same release.
+      # (i) Attach the APK and its SHA-256 sidecar to the GitHub
+      # Release. Runs ONLY on the release-published trigger: on a bare
+      # tag push no release exists yet, so `gh release upload` would
+      # fail. --clobber replaces the assets if the workflow is ever
+      # re-run for the same release.
       - name: Attach APK to the GitHub Release
         if: github.event_name == 'release'
         env:
@@ -144,4 +186,4 @@ jobs:
         run: |
           TAG="${{ github.ref_name }}"
           VERSION="${TAG#v}"
-          gh release upload "$TAG" "officerpath-ai-${VERSION}-arm64.apk" --clobber
+          gh release upload "$TAG" "officerpath-ai-${VERSION}-arm64.apk" "officerpath-ai-${VERSION}-arm64.apk.sha256" --clobber

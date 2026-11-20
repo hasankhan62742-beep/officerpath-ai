@@ -2,12 +2,34 @@
 // OfficerPath AI v2.0.0 — Edge Function: issue-code (ADMIN ONLY)
 // POST { "user_id": "<uuid>", "email": "buyer@gmail.com",
 //        "plan": "premium_1month" | "premium_2months" | "premium_1year"
-//              (also accepts "1" | "2" | "3") }
+//              (also accepts "1" | "2" | "3") — accepted but IGNORED:
+//              the plan is taken from the payment row, never the body,
+//        "payment_id": "<uuid of the pending payments row>" }
 // Authorization: Bearer <ADMIN's JWT> — the caller must have
 // profiles.is_admin = true.
-// Returns { ok: true, code: "OP1-ABCDEF", email_sent: true }
+// Returns { ok: true, code: "OP1-ABCDEF", code_id: "<uuid>",
+//           email_sent: true }
 // The plain code is returned ONLY to the admin caller, once. It is
 // never stored — only its SHA-256 hash goes in activation_codes.
+//
+// TRANSACTION-ID REUSE GUARD (2026-11-20): a code is issued ONLY
+// for a real pending payment row (payment_id is required; the row
+// must exist, belong to user_id, and be status 'pending'), and
+// ONLY if no OTHER approved payment already carries the same
+// transaction_id. After the code is created the function marks
+// THIS payment approved itself (status, reviewed_by, reviewed_at,
+// code_id) — the admin panel no longer does that client-side, so a
+// double-approval cannot issue two codes for one payment. The
+// partial unique index payments_tid_approved_unique (migration
+// 012) is the backstop: if two approvals race, the second UPDATE
+// fails with a unique violation and this function reports
+// tid_already_used. The orphaned code from the losing race is left
+// unused (it expires in 7 days and is visible in the codes table);
+// no email is sent for it.
+//
+// ERROR STRINGS: unauthorized | forbidden_not_admin | invalid_request
+//   | payment_not_found | payment_user_mismatch | payment_not_pending
+//   | tid_already_used | payment_already_handled | server_error
 //
 // REQUIRED SECRETS (Supabase Dashboard -> Edge Functions -> Secrets):
 //   SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
@@ -34,8 +56,6 @@
 // FALLBACK: if RESEND_API_KEY is unset or the send fails, the code is
 // STILL created and returned to the admin (email_sent: false) so the
 // admin can WhatsApp it to the buyer. Email failure never blocks a sale.
-//
-// ERROR STRINGS: unauthorized | forbidden_not_admin | invalid_request
 // ============================================================
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -150,48 +170,135 @@ Deno.serve(async (req: Request) => {
     return json({ ok: false, error: "forbidden_not_admin" }, 403);
   }
 
-  // 2. Validate input.
-  let body: { user_id?: unknown; email?: unknown; plan?: unknown };
+  // 2. Validate input. payment_id is REQUIRED: a code is never
+  // issued without a real pending payment row behind it. The plan
+  // is taken from that row (the server record), never from the
+  // request body — the body plan is ignored, so a code can never be
+  // issued for a different plan than was paid for.
+  let body: {
+    user_id?: unknown;
+    email?: unknown;
+    plan?: unknown;
+    payment_id?: unknown;
+  };
   try {
     body = await req.json();
   } catch {
     return json({ ok: false, error: "invalid_request" }, 400);
   }
-  const planInfo = typeof body.plan === "string"
-    ? PLAN_MAP[body.plan]
-    : undefined;
   const buyerId = typeof body.user_id === "string" ? body.user_id : "";
   const buyerEmail = typeof body.email === "string" ? body.email.trim() : "";
-  if (!planInfo || !buyerId || !buyerEmail.includes("@")) {
+  const paymentId = typeof body.payment_id === "string"
+    ? body.payment_id
+    : "";
+  if (!buyerId || !buyerEmail.includes("@") || !paymentId) {
     return json({ ok: false, error: "invalid_request" }, 400);
   }
-  const planLabel = body.plan === "premium_1year" || body.plan === "3"
+
+  // 3. Bind the issue to a real pending payment. The row must exist,
+  // belong to the buyer, and still be pending — otherwise no code.
+  const { data: payment, error: paymentError } = await admin
+    .from("payments")
+    .select("id, user_id, email, plan, method, transaction_id, status")
+    .eq("id", paymentId)
+    .maybeSingle();
+  if (paymentError || !payment) {
+    return json({ ok: false, error: "payment_not_found" }, 404);
+  }
+  if (payment.user_id !== buyerId) {
+    return json({ ok: false, error: "payment_user_mismatch" }, 400);
+  }
+  if (payment.status !== "pending") {
+    return json({ ok: false, error: "payment_not_pending" }, 409);
+  }
+  // The plan comes from the payment row (the server record). The
+  // M2 CHECK (migration 008) guarantees it is one of the three plan
+  // ids, so this lookup cannot fail on a real row — fail closed if
+  // it ever does.
+  const planInfo = PLAN_MAP[payment.plan];
+  if (!planInfo) {
+    return json({ ok: false, error: "invalid_request" }, 400);
+  }
+  const planLabel = payment.plan === "premium_1year"
     ? "1 Year Premium"
-    : body.plan === "premium_2months" || body.plan === "2"
+    : payment.plan === "premium_2months"
     ? "2 Months Premium"
     : "1 Month Premium";
 
-  // 3. Generate + store the code (hash only). Retry on a hash collision.
+  // 4. Transaction-ID reuse check: if any OTHER payment was already
+  // approved with this transaction_id, the ID was already spent —
+  // refuse, even though the admin asked. (The partial unique index
+  // payments_tid_approved_unique is the backstop for a race between
+  // this check and the approval update in step 6.)
+  const { data: reused } = await admin
+    .from("payments")
+    .select("id")
+    .eq("transaction_id", payment.transaction_id)
+    .eq("status", "approved")
+    .neq("id", payment.id)
+    .limit(1);
+  if (reused && reused.length > 0) {
+    return json({ ok: false, error: "tid_already_used" }, 409);
+  }
+
+  // 5. Generate + store the code (hash only). Retry on a hash collision.
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
   let code = "";
+  let codeId = "";
   let inserted = false;
   for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
     code = generateCode(planInfo.digit);
-    const { error } = await admin.from("activation_codes").insert({
-      code_hash: await sha256Hex(code),
-      plan: body.plan,
-      months: planInfo.months,
-      user_id: buyerId,
-      issued_by: user.id,
-      expires_at: expiresAt.toISOString(),
-    });
-    if (!error) inserted = true;
+    const { data: codeRow, error } = await admin
+      .from("activation_codes")
+      .insert({
+        code_hash: await sha256Hex(code),
+        plan: payment.plan,
+        months: planInfo.months,
+        user_id: buyerId,
+        issued_by: user.id,
+        expires_at: expiresAt.toISOString(),
+      })
+      .select("id")
+      .single();
+    if (!error && codeRow) {
+      inserted = true;
+      codeId = codeRow.id;
+    }
   }
   if (!inserted) {
     return json({ ok: false, error: "server_error" }, 500);
   }
 
-  // 4. Email the plain code to the buyer. Failure here never blocks
+  // 6. Mark THIS payment approved, server-side, in the same call —
+  // status + reviewer + timestamp + the code link. The update is
+  // conditional on the row still being pending, so a simultaneous
+  // second approval of the same payment updates 0 rows and is
+  // reported instead of issuing a second code. If the partial unique
+  // index rejects the update (23505), another approval of the same
+  // transaction_id landed first — report tid_already_used; the code
+  // just created is left unused and no email is sent for it.
+  const { data: updated, error: updateError } = await admin
+    .from("payments")
+    .update({
+      status: "approved",
+      reviewed_by: user.id,
+      reviewed_at: new Date().toISOString(),
+      code_id: codeId,
+    })
+    .eq("id", paymentId)
+    .eq("status", "pending")
+    .select("id");
+  if (updateError) {
+    if (updateError.code === "23505") {
+      return json({ ok: false, error: "tid_already_used" }, 409);
+    }
+    return json({ ok: false, error: "server_error" }, 500);
+  }
+  if (!updated || updated.length === 0) {
+    return json({ ok: false, error: "payment_already_handled" }, 409);
+  }
+
+  // 7. Email the plain code to the buyer. Failure here never blocks
   // the sale: the admin still gets the code back and can WhatsApp it.
   const resendKey = Deno.env.get("RESEND_API_KEY") ?? "";
   const from = Deno.env.get("RESEND_FROM") ??
@@ -215,6 +322,7 @@ Deno.serve(async (req: Request) => {
   return json({
     ok: true,
     code,
+    code_id: codeId,
     email_sent: emailSent,
     ...(emailError ? { email_error: emailError } : {}),
   });

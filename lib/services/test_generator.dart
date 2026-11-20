@@ -211,6 +211,10 @@ List<Question> generateTest({
 
 /// Result of one attempt. Scoring follows the commission rule:
 /// +1 per correct, -[negative] per wrong, 0 for skipped.
+/// Questions WITHOUT an answer (correctIndex -1, "no-answers" mode,
+/// 20 Nov 2026) are never scored: they count in [unscored] only —
+/// never correct, never wrong, never skipped — and the percent /
+/// pass mark are computed over the SCORED questions only ([scoredTotal]).
 class AttemptResult {
   const AttemptResult({
     required this.questions,
@@ -219,6 +223,7 @@ class AttemptResult {
     required this.correct,
     required this.wrong,
     required this.skipped,
+    required this.unscored,
     required this.score,
     required this.percent,
     required this.passed,
@@ -235,6 +240,18 @@ class AttemptResult {
   final int correct;
   final int wrong;
   final int skipped;
+
+  /// Questions with no attached answer — asked, never scored.
+  final int unscored;
+
+  /// Questions that carry an answer (the only ones that can score).
+  int get scoredTotal => questions.length - unscored;
+
+  /// True when at least one question had no answer.
+  bool get hasUnscored => unscored > 0;
+
+  /// True when NO question had an answer — there is no result to show.
+  bool get allUnscored => questions.isNotEmpty && unscored == questions.length;
   final double score;
   final double percent;
   final bool passed;
@@ -310,11 +327,19 @@ AttemptResult scoreAttempt({
   var correct = 0;
   var wrong = 0;
   var skipped = 0;
+  var unscored = 0;
   final perSubject = <String, Map<String, int>>{};
   final wrongQuestions = <Question>[];
 
   for (var i = 0; i < questions.length; i++) {
     final q = questions[i];
+    // No attached answer: never scored, never counted as
+    // correct/wrong/skipped, and never added to the subject totals —
+    // the answer was never in the book, so nothing can be judged.
+    if (!q.hasAnswer) {
+      unscored++;
+      continue;
+    }
     final entry = perSubject.putIfAbsent(
       q.subject.label,
       () => {'correct': 0, 'total': 0},
@@ -334,7 +359,9 @@ AttemptResult scoreAttempt({
   }
 
   final score = correct - wrong * exam.negativeMarking;
-  final total = questions.length;
+  // Percent / pass are over SCORED questions only: an answerless
+  // question must not drag the percent down (it was never judged).
+  final total = questions.length - unscored;
   // AUDIT F18: the raw score may go negative (0 correct, 20 wrong at
   // −0.25 → −5.00) but the PERCENTAGE floors at 0 — commission result
   // cards never show a negative percent. `score` itself stays negative
@@ -347,8 +374,11 @@ AttemptResult scoreAttempt({
   // question list. Built explicitly from that order, not left to
   // map-insertion accident — so the result screen shows GK first,
   // then English, then Maths, matching the test itself.
+  // Answerless questions have no perSubject entry (never scored),
+  // so only scored questions define the order.
   final subjectOrder = <String>[];
   for (final q in questions) {
+    if (!q.hasAnswer) continue;
     if (!subjectOrder.contains(q.subject.label)) {
       subjectOrder.add(q.subject.label);
     }
@@ -364,6 +394,7 @@ AttemptResult scoreAttempt({
     correct: correct,
     wrong: wrong,
     skipped: skipped,
+    unscored: unscored,
     score: score,
     percent: percent,
     passed: passed,

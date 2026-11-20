@@ -93,8 +93,94 @@ class ResultScreen extends StatelessWidget {
     }
   }
 
+  /// No-answers mode (20 Nov 2026): the whole test had no answers
+  /// attached, so there is no result to show — no score ring, no
+  /// PASS/FAIL, no breakdown, no review, no PDF/PNG share. Only the
+  /// honest reason, the time spent, and the way out (a book WITH
+  /// answers, or manual answers). The attempt is not saved to
+  /// History (see TestScreen._submit) and no score is synced.
+  Widget _buildNoResultScreen(BuildContext context) {
+    final minutes = result.durationSeconds ~/ 60;
+    final seconds = result.durationSeconds % 60;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Result — Natija')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(Icons.info_outlined, size: 48),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Is test ka result nahi hai',
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'In ${result.questions.length} questions ke jawab '
+                    'attach nahi the (na bold, na stars, na ABCD key, '
+                    'na tick) — is liye app sahi/ghalat, score ya '
+                    'pass/fail nahi dikha sakti. Koi jawab invent nahi '
+                    'kiya gaya.\n\n'
+                    'Result dekhne ke liye: jawab wali book dobara '
+                    'upload karein, ya "Jawab khud lagayein" se jawab '
+                    'lagayein, phir test dein.',
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Time: ${minutes}m ${seconds}s • '
+                    '${result.questions.length} questions attempted',
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          FilledButton.icon(
+            onPressed: () {
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => SetupScreen(exam: exam),
+                ),
+              );
+            },
+            icon: const Icon(Icons.add),
+            label: const Text('New Test'),
+          ),
+          const SizedBox(height: 8),
+          TextButton.icon(
+            onPressed: () {
+              Navigator.pushAndRemoveUntil(
+                context,
+                MaterialPageRoute(builder: (_) => const HomeScreen()),
+                (route) => false,
+              );
+            },
+            icon: const Icon(Icons.home),
+            label: const Text('Back to Home'),
+          ),
+          const DeveloperCreditFooter(),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    // No-answers mode (20 Nov 2026): every question in this test had
+    // no attached answer, so there is NO result — no score, no
+    // pass/fail, no right/wrong breakdown, no review, no PDF/PNG
+    // share (a 0% FAIL would be a lie). Say so plainly instead.
+    if (result.allUnscored) {
+      return _buildNoResultScreen(context);
+    }
     final theme = Theme.of(context);
     final pct = result.percent.clamp(0, 100) / 100;
     final minutes = result.durationSeconds ~/ 60;
@@ -109,6 +195,18 @@ class ResultScreen extends StatelessWidget {
               child: ListTile(
                 leading: Icon(Icons.timer_off_outlined),
                 title: Text('Time khatam — test auto-submit ho gaya.'),
+              ),
+            ),
+          if (result.hasUnscored)
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.info_outlined),
+                title: Text(
+                  '${result.unscored} question(s) ke jawab nahi the — '
+                  'un ka score nahi hua (na sahi, na ghalat). '
+                  'Neeche score sirf ${result.scoredTotal} jawab wale '
+                  'questions par hai.',
+                ),
               ),
             ),
           if (saveFailed)
@@ -196,7 +294,9 @@ class ResultScreen extends StatelessWidget {
                     ),
                     const SizedBox(height: 12),
                     Text(
-                      'Score: ${result.score.toStringAsFixed(2)} / ${result.questions.length}',
+                      // Scored questions only: an answerless question
+                      // must not appear in the denominator.
+                      'Score: ${result.score.toStringAsFixed(2)} / ${result.scoredTotal}',
                       style: theme.textTheme.titleMedium?.copyWith(
                         fontWeight: FontWeight.bold,
                       ),
@@ -219,6 +319,10 @@ class ResultScreen extends StatelessWidget {
                         backgroundColor: theme.colorScheme.errorContainer,
                       ),
                       Chip(label: Text('Skipped ${result.skipped}')),
+                      if (result.hasUnscored)
+                        Chip(
+                          label: Text('Unscored ${result.unscored}'),
+                        ),
                     ],
                   ),
                   const SizedBox(height: 8),
@@ -272,7 +376,7 @@ class ResultScreen extends StatelessWidget {
                     label: 'Final score',
                     detail: 'raw − deduction',
                     value:
-                        '${result.score.toStringAsFixed(2)} / ${result.questions.length}',
+                        '${result.score.toStringAsFixed(2)} / ${result.scoredTotal}',
                     bold: true,
                   ),
                   _BreakdownRow(

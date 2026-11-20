@@ -4,9 +4,15 @@ import 'package:officerpath_ai/services/payment_proof_service.dart';
 void main() {
   group('validateTransactionId', () {
     test('accepts typical Easypaisa / JazzCash IDs', () {
-      expect(PaymentProofService.validateTransactionId('034277172881234'), isNull);
+      expect(
+        PaymentProofService.validateTransactionId('034277172881234'),
+        isNull,
+      );
       expect(PaymentProofService.validateTransactionId('1234567890'), isNull);
-      expect(PaymentProofService.validateTransactionId('TXN-2026-1188'), isNull);
+      expect(
+        PaymentProofService.validateTransactionId('TXN-2026-1188'),
+        isNull,
+      );
       expect(PaymentProofService.validateTransactionId('ABC 123 DEF'), isNull);
     });
 
@@ -18,10 +24,7 @@ void main() {
     });
 
     test('rejects too-long IDs and illegal characters', () {
-      expect(
-        PaymentProofService.validateTransactionId('A' * 31),
-        isNotNull,
-      );
+      expect(PaymentProofService.validateTransactionId('A' * 31), isNotNull);
       expect(PaymentProofService.validateTransactionId('ABC!123'), isNotNull);
       expect(
         PaymentProofService.validateTransactionId('TXN#123456'),
@@ -75,6 +78,7 @@ void main() {
         planId: 'premium_2months',
         method: 'JazzCash',
         transactionId: '  03060853742111 ',
+        screenshotPath: 'user-123/1234567890_42.jpg',
       );
       expect(payload, {
         'user_id': 'user-123',
@@ -83,6 +87,7 @@ void main() {
         'method': 'JazzCash',
         'transaction_id': '03060853742111',
         'status': 'pending',
+        'screenshot_path': 'user-123/1234567890_42.jpg',
       });
     });
 
@@ -93,9 +98,11 @@ void main() {
         planId: 'premium_1month',
         method: 'Easypaisa',
         transactionId: '1234567890',
+        screenshotPath: 'user-123/999.jpg',
       );
       expect(payload['email'], isNull);
       expect(payload['status'], 'pending');
+      expect(payload['screenshot_path'], 'user-123/999.jpg');
     });
   });
 
@@ -114,18 +121,19 @@ void main() {
       expect(proof.plan, 'premium_1year');
       expect(proof.statusLabel, 'Pending');
       expect(proof.isPending, isTrue);
+      expect(proof.createdAt, DateTime.parse('2026-11-19T10:00:00.000Z'));
       expect(
-        proof.createdAt,
-        DateTime.parse('2026-11-19T10:00:00.000Z'),
-      );
-      expect(
-        PaymentProof.fromJson({'plan': 'premium_1month', 'status': 'approved'})
-            .statusLabel,
+        PaymentProof.fromJson({
+          'plan': 'premium_1month',
+          'status': 'approved',
+        }).statusLabel,
         'Approved',
       );
       expect(
-        PaymentProof.fromJson({'plan': 'premium_1month', 'status': 'rejected'})
-            .statusLabel,
+        PaymentProof.fromJson({
+          'plan': 'premium_1month',
+          'status': 'rejected',
+        }).statusLabel,
         'Rejected',
       );
     });
@@ -140,18 +148,25 @@ void main() {
           inserted = row;
           return {...row, 'id': 'pay-1', 'created_at': '2026-11-19T10:00:00Z'};
         },
+        uploader:
+            ({required userId, required fileName, required bytes}) async =>
+                'user-1/receipt.jpg',
         isConfigured: () => true,
       );
       final result = await service.submitPaymentProof(
         plan: 'premium_1month',
         method: 'JazzCash',
         transactionId: '1234567890',
+        screenshotBytes: [1, 2, 3],
+        screenshotName: 'receipt.jpg',
       );
       expect(result.ok, isTrue);
       expect(result.proof?.status, 'pending');
+      expect(result.proof?.screenshotPath, 'user-1/receipt.jpg');
       expect(inserted?['user_id'], 'user-1');
       expect(inserted?['email'], 'student@example.com');
       expect(inserted?['status'], 'pending');
+      expect(inserted?['screenshot_path'], 'user-1/receipt.jpg');
     });
 
     test('bad transaction ID never reaches the server', () async {
@@ -211,6 +226,213 @@ void main() {
       expect(await service.hasPendingProof('premium_2months'), isTrue);
       expect(await service.hasPendingProof('premium_1month'), isFalse);
       expect(await service.hasPendingProof('premium_1year'), isFalse);
+    });
+  });
+  group('submitPaymentProof duplicate transaction ID (UX check)', () {
+    test('same TID as a pending proof is refused, insert never runs', () async {
+      var called = false;
+      final service = PaymentProofService(
+        accountProvider: () => (id: 'user-1', email: 'a@b.co'),
+        inserter: (_) async {
+          called = true;
+          return {};
+        },
+        fetcher:
+            (_) async => [
+              {
+                'plan': 'premium_1month',
+                'method': 'JazzCash',
+                'transaction_id': '1234567890',
+                'status': 'pending',
+              },
+            ],
+        isConfigured: () => true,
+      );
+      final result = await service.submitPaymentProof(
+        plan: 'premium_1month',
+        method: 'JazzCash',
+        transactionId: '1234567890',
+        // Screenshot supplied so the test reaches the duplicate check
+        // (the screenshot is required and checked first); the
+        // duplicate refusal happens before any upload.
+        screenshotBytes: [1, 2, 3],
+      );
+      expect(result.ok, isFalse);
+      expect(result.error, contains('already submitted'));
+      expect(called, isFalse);
+    });
+
+    test('same TID as an APPROVED proof is also refused', () async {
+      var called = false;
+      final service = PaymentProofService(
+        accountProvider: () => (id: 'user-1', email: 'a@b.co'),
+        inserter: (_) async {
+          called = true;
+          return {};
+        },
+        fetcher:
+            (_) async => [
+              {
+                'plan': 'premium_1month',
+                'method': 'Easypaisa',
+                'transaction_id': '1234567890',
+                'status': 'approved',
+              },
+            ],
+        isConfigured: () => true,
+      );
+      final result = await service.submitPaymentProof(
+        plan: 'premium_1month',
+        method: 'Easypaisa',
+        transactionId: ' 1234567890 ',
+        // Screenshot supplied so the test reaches the duplicate check.
+        screenshotBytes: [1, 2, 3],
+      );
+      expect(result.ok, isFalse);
+      expect(result.error, contains('already submitted'));
+      expect(called, isFalse);
+    });
+
+    test('a different TID submits normally', () async {
+      var called = false;
+      final service = PaymentProofService(
+        accountProvider: () => (id: 'user-1', email: 'a@b.co'),
+        inserter: (row) async {
+          called = true;
+          return {...row, 'id': 'pay-9'};
+        },
+        fetcher:
+            (_) async => [
+              {
+                'plan': 'premium_1month',
+                'method': 'JazzCash',
+                'transaction_id': '1234567890',
+                'status': 'pending',
+              },
+            ],
+        uploader:
+            ({required userId, required fileName, required bytes}) async =>
+                'user-1/receipt.jpg',
+        isConfigured: () => true,
+      );
+      final result = await service.submitPaymentProof(
+        plan: 'premium_1month',
+        method: 'JazzCash',
+        transactionId: '0987654321',
+        screenshotBytes: [1, 2, 3],
+        screenshotName: 'receipt.jpg',
+      );
+      expect(result.ok, isTrue);
+      expect(called, isTrue);
+    });
+
+    test('list load failure is fail-open: submit proceeds', () async {
+      var called = false;
+      final service = PaymentProofService(
+        accountProvider: () => (id: 'user-1', email: 'a@b.co'),
+        inserter: (row) async {
+          called = true;
+          return {...row, 'id': 'pay-9'};
+        },
+        fetcher: (_) async => throw Exception('offline'),
+        // The duplicate check fails open, so the submit proceeds to
+        // the (fake) upload + insert — both fakes are needed.
+        uploader:
+            ({required userId, required fileName, required bytes}) async =>
+                'user-1/receipt.jpg',
+        isConfigured: () => true,
+      );
+      final result = await service.submitPaymentProof(
+        plan: 'premium_1month',
+        method: 'JazzCash',
+        transactionId: '1234567890',
+        screenshotBytes: [1, 2, 3],
+      );
+      expect(result.ok, isTrue);
+      expect(called, isTrue);
+    });
+  });
+
+  group('submitPaymentProof receipt screenshot (required)', () {
+    test('missing screenshot is refused; nothing is uploaded or inserted',
+        () async {
+      var uploadCalled = false;
+      var insertCalled = false;
+      final service = PaymentProofService(
+        accountProvider: () => (id: 'user-1', email: 'a@b.co'),
+        inserter: (_) async {
+          insertCalled = true;
+          return {};
+        },
+        uploader: ({required userId, required fileName, required bytes}) async {
+          uploadCalled = true;
+          return 'user-1/receipt.jpg';
+        },
+        isConfigured: () => true,
+      );
+      final result = await service.submitPaymentProof(
+        plan: 'premium_1month',
+        method: 'JazzCash',
+        transactionId: '1234567890',
+      );
+      expect(result.ok, isFalse);
+      expect(result.error, contains('receipt screenshot'));
+      expect(uploadCalled, isFalse);
+      expect(insertCalled, isFalse);
+    });
+
+    test('upload failure is refused; insert never runs', () async {
+      var insertCalled = false;
+      final service = PaymentProofService(
+        accountProvider: () => (id: 'user-1', email: 'a@b.co'),
+        inserter: (_) async {
+          insertCalled = true;
+          return {};
+        },
+        uploader: ({required userId, required fileName, required bytes}) async =>
+            throw Exception('offline'),
+        isConfigured: () => true,
+      );
+      final result = await service.submitPaymentProof(
+        plan: 'premium_1month',
+        method: 'JazzCash',
+        transactionId: '1234567890',
+        screenshotBytes: [1, 2, 3],
+        screenshotName: 'receipt.jpg',
+      );
+      expect(result.ok, isFalse);
+      expect(result.error, contains('Could not upload'));
+      expect(insertCalled, isFalse);
+    });
+
+    test('upload success stores the returned path in the payload', () async {
+      Map<String, dynamic>? inserted;
+      String? uploadedName;
+      final service = PaymentProofService(
+        accountProvider: () => (id: 'user-1', email: 'a@b.co'),
+        inserter: (row) async {
+          inserted = row;
+          return {...row, 'id': 'pay-9'};
+        },
+        uploader: ({required userId, required fileName, required bytes}) async {
+          uploadedName = fileName;
+          expect(userId, 'user-1');
+          expect(bytes, [1, 2, 3]);
+          return 'user-1/1700000000000_42.jpg';
+        },
+        isConfigured: () => true,
+      );
+      final result = await service.submitPaymentProof(
+        plan: 'premium_1month',
+        method: 'JazzCash',
+        transactionId: '1234567890',
+        screenshotBytes: [1, 2, 3],
+        screenshotName: 'receipt.jpg',
+      );
+      expect(result.ok, isTrue);
+      expect(uploadedName, 'receipt.jpg');
+      expect(inserted?['screenshot_path'], 'user-1/1700000000000_42.jpg');
+      expect(result.proof?.screenshotPath, 'user-1/1700000000000_42.jpg');
     });
   });
 }

@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OfficerPath AI — Admin Panel</title>
   <link rel="stylesheet" href="styles.css">
+  <!-- PWA: installable on the phone home screen (manifest + icons). -->
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#0b1f3a">
   <!-- Supabase JS client (UMD build, exposes global `supabase`). -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <!-- Owner config: copy config.example.js to config.js and fill in the
@@ -25,6 +28,13 @@
   </header>
 
   <main>
+    <!-- New-payment alert banner (live Realtime alert; hidden until a
+         payment arrives). The sound + banner only work while the panel
+         is open; the email alert covers the closed-panel case. -->
+    <div id="payment-alert-banner" class="alert-banner hidden" role="alert">
+      <span id="payment-alert-text"></span>
+      <button id="payment-alert-close" type="button" aria-label="Dismiss">✕</button>
+    </div>
     <!-- Shown when config.js is missing or still has placeholders. -->
     <section id="config-error" class="card error-card hidden" aria-live="polite">
       <h2>Setup needed</h2>
@@ -107,7 +117,10 @@
       <section class="card">
         <h2>Pending payments</h2>
         <p class="muted">Approve a payment to issue the buyer a single-use activation code.
-        Reject it when the payment cannot be verified.</p>
+        Reject it when the payment cannot be verified.
+        Receipts arrive two ways: the in-app upload (open the Receipt link
+        on each row) and WhatsApp (+92 342 7717288) — match the TID,
+        amount and receiver number in the screenshot before approving.</p>
         <div id="payments-queue" class="table-wrap">
           <table id="payments-table">
             <thead>

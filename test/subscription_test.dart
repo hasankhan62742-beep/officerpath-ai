@@ -2,16 +2,23 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:officerpath_ai/services/billing_service.dart';
-import 'package:officerpath_ai/services/manual_activation.dart';
 import 'package:officerpath_ai/services/pdf_text_extractor.dart';
+import 'package:officerpath_ai/services/secure_key_store.dart';
 import 'package:officerpath_ai/services/subscription_service.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  // The premium cache lives in secure storage (audit L8, fixed
+  // 2026-11-20); tests inject the in-memory fake so no platform
+  // channel is needed.
+  late InMemorySecureStore secureStore;
+
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     await SubscriptionService.instance.resetForTest();
+    secureStore = InMemorySecureStore();
+    SubscriptionService.instance.secureStoreOverride = secureStore;
   });
 
   test('freemium numbers are exactly as confirmed', () {
@@ -52,37 +59,34 @@ void main() {
     final sub = SubscriptionService.instance;
     expect(await sub.canAddBook(5), isFalse);
     expect(await sub.canAddBook(4), isTrue);
-    await sub.grantPremium(PremiumPlan.plans[2]);
+    await sub.applyServerPremium(
+      'premium_1year',
+      DateTime.now().add(const Duration(days: 365)),
+    );
     expect(await sub.isPremium(), isTrue);
     expect(await sub.canGenerateTest(), isTrue);
     expect(await sub.testsRemaining(), -1); // -1 = unlimited
     expect(await sub.canAddBook(99), isTrue);
   });
 
-  test('manual activation codes round-trip for all 3 plans', () async {
-    final activation = ManualActivationService.instance;
-    for (final plan in PremiumPlan.plans) {
-      final code = ManualActivationService.buildCode(plan.id);
-      expect(activation.validateCode(code)?.id, plan.id);
-      expect(activation.validateCode(code.toLowerCase())?.id, plan.id);
-    }
-    // Tampered code / wrong format must fail.
-    expect(activation.validateCode('OP2-AAAAAA'), isNull);
-    expect(activation.validateCode('OP9-AAAAAA'), isNull);
-    expect(activation.validateCode('hello'), isNull);
-    expect(activation.validateCode(''), isNull);
-  });
-
-  test('activation code grants premium for the encoded plan', () async {
-    final activation = ManualActivationService.instance;
-    final code = ManualActivationService.buildCode('premium_2months');
-    final plan = await activation.activateWithCode(code);
-    expect(plan?.id, 'premium_2months');
-    expect(await SubscriptionService.instance.isPremium(), isTrue);
-    expect(
-      await SubscriptionService.instance.currentPlanId(),
-      'premium_2months',
-    );
+  test('premium cache lives in secure storage, never SharedPreferences',
+      () async {
+    final sub = SubscriptionService.instance;
+    final until = DateTime.now().add(const Duration(days: 60));
+    await sub.applyServerPremium('premium_2months', until);
+    expect(await sub.isPremium(), isTrue);
+    expect(await sub.currentPlanId(), 'premium_2months');
+    // No premium state in SharedPreferences — neither the new keys
+    // (which must never be written there) nor the legacy v1 keys.
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getBool('is_premium_v1'), isNull);
+    expect(prefs.getString('premium_plan_id_v1'), isNull);
+    expect(prefs.getString('premium_until_iso_v1'), isNull);
+    // ...and it IS in the secure store (key names mirror the private
+    // constants in SubscriptionService).
+    expect(await secureStore.read('premium_is_active_v2'), 'true');
+    expect(await secureStore.read('premium_plan_id_v2'), 'premium_2months');
+    expect(await secureStore.read('premium_until_iso_v2'), isNotNull);
   });
 
   test('billing stub never grants premium and never charges', () async {

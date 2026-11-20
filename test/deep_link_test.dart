@@ -12,7 +12,17 @@ void main() {
       expect(link.hasRecoveryToken, isTrue);
     });
 
-    test('implicit-flow tokens in the fragment', () {
+    test('PKCE code in the fragment is also accepted', () {
+      final link = parseResetPasswordUri(
+        Uri.parse('officerpath://reset-password#code=abc123&type=recovery'),
+      );
+      expect(link.isResetLink, isTrue);
+      expect(link.code, 'abc123');
+      expect(link.type, 'recovery');
+      expect(link.hasRecoveryToken, isTrue);
+    });
+
+    test('implicit-flow tokens in the fragment are REJECTED (audit L7)', () {
       final link = parseResetPasswordUri(
         Uri.parse(
           'officerpath://reset-password'
@@ -20,13 +30,13 @@ void main() {
         ),
       );
       expect(link.isResetLink, isTrue);
-      expect(link.accessToken, 'AT123');
-      expect(link.refreshToken, 'RT456');
-      expect(link.type, 'recovery');
-      expect(link.hasRecoveryToken, isTrue);
+      // No PKCE code, so no recovery session may be established from
+      // this link — bare URL tokens must never reach setSession().
+      expect(link.code, isNull);
+      expect(link.hasRecoveryToken, isFalse);
     });
 
-    test('tokens may also arrive as query parameters', () {
+    test('tokens as query parameters are REJECTED too', () {
       final link = parseResetPasswordUri(
         Uri.parse(
           'officerpath://reset-password'
@@ -34,6 +44,18 @@ void main() {
         ),
       );
       expect(link.isResetLink, isTrue);
+      expect(link.code, isNull);
+      expect(link.hasRecoveryToken, isFalse);
+    });
+
+    test('tokens alongside a code do not override the code', () {
+      final link = parseResetPasswordUri(
+        Uri.parse(
+          'officerpath://reset-password?code=abc123'
+          '#access_token=AT&refresh_token=RT',
+        ),
+      );
+      expect(link.code, 'abc123');
       expect(link.hasRecoveryToken, isTrue);
     });
 

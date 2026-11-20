@@ -12,8 +12,10 @@ import 'test_helpers.dart';
 /// tmp_verify_all_test.dart (deleted). F3 numbers are the v1.3
 /// measured values (parser md5 0edc9e9b…, 19 Nov 2026): the v1.2
 /// audit counted 162 q-only; v1.3 adds 19 bold-resolved table rows.
+/// 20 Nov 2026: 181 → 186 (159 q-only + 27 table) — table fixes
+/// recover 8 more real rows; see universal_formats_test.dart.
 void main() {
-  test('F3 Pak Affairs prose: 181 MCQs (162 flashcard + 19 table)',
+  test('F3 Pak Affairs prose: 186 MCQs (159 flashcard + 27 table)',
       () async {
     final file = File(
       '/home/hatch/workspace/user/files/Pak_Affairs_by_CSPs.pdf',
@@ -27,9 +29,11 @@ void main() {
       sourceLabel: 'Pak Affairs',
     );
     expect(pages.length, 125);
-    expect(r.parsed, 181);
-    expect(r.formatCounts['q-only'], 162);
-    expect(r.formatCounts['table'], 19);
+    // 20 Nov 2026 (was 181 = 162 + 19): table fixes recover 8 more
+    // real table rows (27) and 3 q-only items move to the table pass.
+    expect(r.parsed, 186);
+    expect(r.formatCounts['q-only'], 159);
+    expect(r.formatCounts['table'], 27);
     expect(r.parts, isNotEmpty);
   });
 

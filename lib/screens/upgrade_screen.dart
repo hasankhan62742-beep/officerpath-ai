@@ -1,3 +1,6 @@
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
@@ -25,6 +28,32 @@ const String kOwnerWhatsAppDisplay = '+92 342 7717288';
 
 /// Owner's WhatsApp in international format, for wa.me links.
 const String kOwnerWhatsApp = '923427717288';
+
+/// WhatsApp receipt link for a submitted payment proof.
+///
+/// The receipt screenshot itself goes on WhatsApp — Easypaisa and
+/// JazzCash have no lookup API, so the owner's manual check of the
+/// screenshot (receiver number + amount + TID) is the only
+/// confirmation a payment really arrived. The prefilled message
+/// carries the plan, transaction ID and registered email so the
+/// owner can match it to the pending payment row. Pure — unit-tested.
+Uri receiptWhatsAppUri({
+  required PremiumPlan plan,
+  required String method,
+  required String transactionId,
+  required String? email,
+}) {
+  final message =
+      'Assalam-o-Alaikum! OfficerPath AI Premium chahiye.\n'
+      'Plan: ${plan.name} (${plan.priceLabel})\n'
+      'Payment method: $method\n'
+      'Transaction ID: ${transactionId.isEmpty ? '(screenshot attached)' : transactionId}\n'
+      'Registered email: ${email ?? '(not signed in)'}\n'
+      'Receipt screenshot attached — please send my activation code. Shukriya!';
+  return Uri.parse(
+    'https://wa.me/$kOwnerWhatsApp?text=${Uri.encodeComponent(message)}',
+  );
+}
 
 /// Upgrade screen — Free vs Premium (PKR), v2.0 server flow.
 ///
@@ -81,6 +110,15 @@ class _UpgradeScreenState extends State<UpgradeScreen> {
   String? _redeemError;
   String? _proofError;
   String? _proofMessage;
+  // Last successfully submitted proof — the TID field is cleared on
+  // submit, so the WhatsApp receipt button falls back to these values
+  // and the prefilled message still carries the real TID.
+  String? _lastSubmittedTx;
+  String? _lastSubmittedPlanId;
+  String? _lastSubmittedMethod;
+  // Picked receipt screenshot (required for a new submission). The
+  // file itself is uploaded by PaymentProofService on submit.
+  PlatformFile? _receiptFile;
   final _codeController = TextEditingController();
   final _txController = TextEditingController();
   final _emailController = TextEditingController();
@@ -166,10 +204,16 @@ class _UpgradeScreenState extends State<UpgradeScreen> {
       _proofError = null;
       _proofMessage = null;
     });
+    final submittedPlan = _selectedPlanId;
+    final submittedMethod = _method;
+    final submittedTx = _txController.text.trim();
+    final receiptBytes = await _receiptBytes();
     final result = await _proofs.submitPaymentProof(
-      plan: _selectedPlanId,
-      method: _method,
-      transactionId: _txController.text.trim(),
+      plan: submittedPlan,
+      method: submittedMethod,
+      transactionId: submittedTx,
+      screenshotBytes: receiptBytes,
+      screenshotName: _receiptFile?.name,
     );
     if (!mounted) return;
     setState(() => _proofBusy = false);
@@ -177,29 +221,82 @@ class _UpgradeScreenState extends State<UpgradeScreen> {
       setState(() => _proofError = result.error ?? 'Could not submit.');
       return;
     }
+    // Keep the submitted values for the WhatsApp receipt button — the
+    // TID field is cleared below, and the prefilled message must still
+    // carry the real TID.
+    _lastSubmittedTx = submittedTx;
+    _lastSubmittedPlanId = submittedPlan;
+    _lastSubmittedMethod = submittedMethod;
     _txController.clear();
+    _receiptFile = null;
     await _loadProofs();
     if (!mounted) return;
     setState(
       () =>
           _proofMessage =
-              'Proof submitted — Pending approval. The owner will send '
-              'your activation code once the payment is verified.',
+              'Proof submitted — Pending approval. IMPORTANT: send your '
+              'payment receipt screenshot on WhatsApp to $kOwnerWhatsAppDisplay '
+              '(button below) — the owner matches the screenshot (receiver '
+              'number + amount + TID) before sending your activation code.',
     );
   }
 
+  /// Picks the receipt screenshot from the gallery (the Easypaisa /
+  /// JazzCash receipt screenshot already on the phone). file_picker
+  /// is already a dependency — no new package for this.
+  Future<void> _pickReceipt() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.image,
+        allowMultiple: false,
+        withData: true,
+      );
+      if (result == null || result.files.isEmpty) return;
+      if (!mounted) return;
+      setState(() {
+        _receiptFile = result.files.first;
+        _proofError = null;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(
+        () =>
+            _proofError =
+                'Could not pick the screenshot. Try again from your gallery.',
+      );
+    }
+  }
+
+  /// Bytes of the picked receipt, or null when nothing is picked or
+  /// the file cannot be read (the service then reports it as missing).
+  Future<List<int>?> _receiptBytes() async {
+    final f = _receiptFile;
+    if (f == null) return null;
+    if (f.bytes != null) return f.bytes;
+    if (f.path != null) {
+      try {
+        return await File(f.path!).readAsBytes();
+      } catch (_) {
+        return null;
+      }
+    }
+    return null;
+  }
+
   Future<void> _sendProofOnWhatsApp() async {
-    final plan = PremiumPlan.byId(_selectedPlanId);
-    final tx = _txController.text.trim();
-    final message =
-        'Assalam-o-Alaikum! OfficerPath AI Premium chahiye.\n'
-        'Plan: ${plan.name} (${plan.priceLabel})\n'
-        'Payment method: $_method\n'
-        'Transaction ID: ${tx.isEmpty ? '(screenshot attached)' : tx}\n'
-        'Registered email: ${_accountEmail ?? '(not signed in)'}\n'
-        'Please send my activation code. Shukriya!';
-    final uri = Uri.parse(
-      'https://wa.me/$kOwnerWhatsApp?text=${Uri.encodeComponent(message)}',
+    // Prefer what is typed now; after a submit the field is cleared,
+    // so fall back to the last submitted proof.
+    final tx =
+        _txController.text.trim().isNotEmpty
+            ? _txController.text.trim()
+            : (_lastSubmittedTx ?? '');
+    final plan = PremiumPlan.byId(_lastSubmittedPlanId ?? _selectedPlanId);
+    final method = _lastSubmittedMethod ?? _method;
+    final uri = receiptWhatsAppUri(
+      plan: plan,
+      method: method,
+      transactionId: tx,
+      email: _accountEmail,
     );
     var ok = false;
     try {
@@ -212,7 +309,7 @@ class _UpgradeScreenState extends State<UpgradeScreen> {
       SnackBar(
         content: Text(
           ok
-              ? 'WhatsApp opened — send your payment proof, and the owner will reply with your activation code.'
+              ? 'WhatsApp opened — attach your payment receipt screenshot, and the owner will reply with your activation code.'
               : 'Could not open WhatsApp. Message the owner at $kOwnerWhatsAppDisplay.',
         ),
       ),
@@ -364,9 +461,11 @@ class _UpgradeScreenState extends State<UpgradeScreen> {
                     'or JazzCash app to the number below.',
                   ),
                   Text(
-                    '3. Submit your transaction ID in Step 2 below, or '
-                    'send the payment screenshot on WhatsApp '
-                    '($kOwnerWhatsAppDisplay).',
+                    '3. Submit your transaction ID in Step 2 below AND '
+                    'send the payment receipt screenshot on WhatsApp '
+                    '($kOwnerWhatsAppDisplay) — the owner matches the '
+                    'screenshot (receiver number + amount + TID) before '
+                    'sending your code.',
                   ),
                   const Text(
                     '4. The owner checks the payment and sends you an '
@@ -499,6 +598,15 @@ class _UpgradeScreenState extends State<UpgradeScreen> {
             'Selected plan: ${selectedPlan.name} (${selectedPlan.priceLabel})',
             style: const TextStyle(fontWeight: FontWeight.w600),
           ),
+          const SizedBox(height: 4),
+          Text(
+            'Required: attach the receipt screenshot below AND send it '
+            'on WhatsApp to $kOwnerWhatsAppDisplay — approval needs it.',
+            style: TextStyle(
+              fontWeight: FontWeight.w600,
+              color: theme.colorScheme.error,
+            ),
+          ),
           const SizedBox(height: 8),
           Card(
             child: Padding(
@@ -535,6 +643,35 @@ class _UpgradeScreenState extends State<UpgradeScreen> {
                       hintText: 'e.g. 034277172881234',
                       border: OutlineInputBorder(),
                     ),
+                  ),
+                  const SizedBox(height: 12),
+                  // Receipt screenshot — REQUIRED (the owner matches it
+                  // before approving; the same screenshot also goes on
+                  // WhatsApp via the button below).
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _pickReceipt,
+                          icon: const Icon(Icons.attach_file),
+                          label: Text(
+                            _receiptFile == null
+                                ? 'Attach receipt screenshot (required)'
+                                : 'Receipt: ${_receiptFile!.name}',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
+                      if (_receiptFile != null) ...[
+                        const SizedBox(width: 8),
+                        IconButton(
+                          icon: const Icon(Icons.close),
+                          tooltip: 'Remove screenshot',
+                          onPressed:
+                              () => setState(() => _receiptFile = null),
+                        ),
+                      ],
+                    ],
                   ),
                   const SizedBox(height: 12),
                   TextField(
@@ -588,7 +725,9 @@ class _UpgradeScreenState extends State<UpgradeScreen> {
                     child: OutlinedButton.icon(
                       onPressed: _sendProofOnWhatsApp,
                       icon: const Icon(Icons.chat),
-                      label: const Text('Send proof on WhatsApp'),
+                      label: const Text(
+                        'Send receipt screenshot on WhatsApp',
+                      ),
                     ),
                   ),
                   if (hasPending) ...[

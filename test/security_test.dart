@@ -56,18 +56,30 @@ void main() {
     expect(offenders, isEmpty);
   });
 
-  test('no hardcoded Gemini key or default activation secret in lib/',
+  test('no hardcoded Gemini key or default activation secret in lib/ and tools/',
       () {
     final offenders = <String>[];
-    for (final f in libDartFiles()) {
+    final files = [
+      ...libDartFiles(),
+      // tools/ holds Dart CLIs too — the deleted v1 code generator
+      // lived here, so the guard must cover it as well.
+      ...Directory('tools')
+          .listSync(recursive: true)
+          .whereType<File>()
+          .where((f) => f.path.endsWith('.dart')),
+    ];
+    for (final f in files) {
       final content = read(f.path);
       if (RegExp(r'AIza[0-9A-Za-z_\-]{10,}').hasMatch(content)) {
         offenders.add('${f.path}: looks like a hardcoded API key');
       }
-      // The activation secret default must never be a real value in
-      // source — the mint tool refuses a default (see
-      // manual_activation.dart).
-      if (content.contains('DEFAULT_ACTIVATION_SECRET')) {
+      // L3/L4 (audit 2026-11-20): the v1 offline-activation default
+      // secret was 'CHANGE_ME_IN_RELEASE_BUILD'. The dead code that
+      // used it is deleted, and this string must never come back
+      // silently — an earlier version of this test guarded
+      // 'DEFAULT_ACTIVATION_SECRET', a string that never existed
+      // in the code, so it passed while the real default shipped.
+      if (content.contains('CHANGE_ME_IN_RELEASE_BUILD')) {
         offenders.add('${f.path}: default activation secret present');
       }
     }

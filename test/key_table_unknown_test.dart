@@ -38,7 +38,7 @@ void main() {
     expect(isUnknownKeyToken(''), isFalse);
   });
 
-  test('MPT real file: 142 parsed, "?" questions excluded, Q1 keyed', () async {
+  test('MPT real file: 143 parsed, "?" questions excluded, Q1 keyed', () async {
     final file = File(
       '/home/hatch/workspace/user/files/MPT-CSS-2027-Solved.pdf',
     );
@@ -49,7 +49,7 @@ void main() {
       'sourceId': 'mpt-key',
       'sourceLabel': 'MPT-CSS-2027-Solved',
     });
-    expect(maps['parsed'], 142);
+    expect(maps['parsed'], 143);
     expect(maps['skipped'], 3);
 
     final pages = extractPdfPages(bytes);

@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -57,6 +58,7 @@ class PdfImportResult {
     this.noiseLinesFiltered = 0,
     this.facts = const [],
     this.answerPending = const [],
+    this.keyPaperReport = const [],
     this.ocrMethods = const {},
     this.poorOcrPages = const [],
   });
@@ -147,6 +149,11 @@ class PdfImportResult {
   /// CORRECTION on explicit choice. Never counted in [parsed],
   /// never guessed, never sent to AI.
   final List<PendingQuestion> answerPending;
+
+  /// Plain-language key-paper report for the preview (see
+  /// [ParseResult.keyPaperReport]): per-paper attribution plus any
+  /// key whose named paper has no questions in the import.
+  final List<String> keyPaperReport;
 
   /// OCR method used per OCR'd page (1-based page → method label,
   /// e.g. "Urdu OCR: device (Tesseract)") — shown in the preview so
@@ -533,6 +540,67 @@ class PdfImportService {
     );
   }
 
+  /// Reads the RAW TEXT of a separately attached answer-key file
+  /// (20 Nov 2026, "Jawab wali key attach karein") — a key photo, a
+  /// key PDF, a DOCX, or a TXT key. The file goes through the SAME
+  /// import path the book import uses ([importPdf] / [importImage] /
+  /// [importDocx] — same OCR tiers, same text extraction; no new OCR
+  /// engine), and only the `.text` is kept: the caller parses key
+  /// entries out of it with `parseKeyEntries` via `applyAttachedKey`
+  /// (see `answer_key.dart`). The MCQ parse the import also runs is
+  /// discarded — a key page is not a question bank. Throws the same
+  /// exceptions the import throws (corrupt file, cancelled) so the
+  /// caller can report them plainly.
+  static Future<String> extractKeyText(
+    Uint8List bytes, {
+    required String extension,
+    void Function(PdfImportProgress)? onProgress,
+    bool Function()? isCancelled,
+    bool urduBook = false,
+    bool bestQualityOcr = false,
+    GeminiVisionOcr? visionOcr,
+  }) async {
+    final progress = onProgress ?? (_) {};
+    final cancelled = isCancelled ?? () => false;
+    switch (extension) {
+      case 'pdf':
+        return (await importPdf(
+          bytes,
+          sourceId: 'key-attach',
+          sourceLabel: 'Answer key',
+          onProgress: progress,
+          isCancelled: cancelled,
+          urduBook: urduBook,
+          bestQualityOcr: bestQualityOcr,
+          visionOcr: visionOcr,
+        )).text;
+      case 'jpg':
+      case 'jpeg':
+      case 'png':
+        return (await importImage(
+          bytes,
+          sourceId: 'key-attach',
+          sourceLabel: 'Answer key',
+          onProgress: progress,
+          isCancelled: cancelled,
+          urduBook: urduBook,
+          bestQualityOcr: bestQualityOcr,
+          visionOcr: visionOcr,
+        )).text;
+      case 'docx':
+        return (await importDocx(
+          bytes,
+          sourceId: 'key-attach',
+          sourceLabel: 'Answer key',
+          onProgress: progress,
+          isCancelled: cancelled,
+        )).text;
+      default:
+        // TXT (and anything else the picker allowed): plain text.
+        return utf8.decode(bytes, allowMalformed: true);
+    }
+  }
+
   static PdfImportResult _resultFromMaps({
     required String text,
     required int pageCount,
@@ -601,6 +669,8 @@ class PdfImportService {
               .map(PendingQuestion.fromMap)
               .toList() ??
           const [],
+      keyPaperReport:
+          (maps['keyPaperReport'] as List?)?.cast<String>() ?? const [],
       ocrMethods: ocrMethods,
       poorOcrPages: poorOcrPages,
     );
@@ -666,7 +736,55 @@ class PdfImportService {
         final recognized = await recognizer.processImage(
           InputImage.fromFilePath(tmp.path),
         );
-        return recognized.text;
+        // Two-column pages: ML Kit's raw text interleaves the
+        // columns, so stems get separated from their options and
+        // asterisk answers get detached. Order the lines
+        // top-to-bottom and split the columns first — the parser's
+        // contract. A table page spans the full width, so it is
+        // detected FIRST: the column split would destroy its rows.
+        // Any failure here falls back to the raw text, never to a
+        // lost page.
+        try {
+          final lines =
+              <({String text, double x, double y, double width})>[];
+          final elements = <({
+            String text,
+            double x,
+            double y,
+            double width,
+            double height
+          })>[];
+          for (final block in recognized.blocks) {
+            for (final line in block.lines) {
+              final text = line.text.trim();
+              if (text.isEmpty) continue;
+              final box = line.boundingBox;
+              lines.add((
+                text: text,
+                x: box.left,
+                y: box.top,
+                width: box.right - box.left,
+              ));
+              for (final el in line.elements) {
+                final elText = el.text.trim();
+                if (elText.isEmpty) continue;
+                final ebox = el.boundingBox;
+                elements.add((
+                  text: elText,
+                  x: ebox.left,
+                  y: ebox.top,
+                  width: ebox.right - ebox.left,
+                  height: ebox.bottom - ebox.top,
+                ));
+              }
+            }
+          }
+          final table = reconstructTableText(elements);
+          if (table != null) return table;
+          return columnSplitOcrText(recognized.text, lines);
+        } catch (_) {
+          return recognized.text;
+        }
       } finally {
         await recognizer.close();
       }

@@ -13,7 +13,7 @@ import 'test_helpers.dart';
 /// 19 Nov 2026); the 30 s bound is the no-ANR bar, not the measured
 /// time (measured: ~6.7 s total).
 void main() {
-  test('Examveda 546pp: 3202 parsed, 1689 skipped, under 30 s', () async {
+  test('Examveda 546pp: 3212 parsed, 1688 skipped, under 30 s', () async {
     final file = File(
       '/home/hatch/workspace/user/files/Examveda_GK_Comp_Eng_Sir_Waleed_0300_1111938.pdf',
     );
@@ -36,10 +36,14 @@ void main() {
     // answer-line 3162→3179; q-only 7→8, table 16→17). Two verified
     // book-correct: "The Mistral is" → D, "20th August is
     // celebrated as" → B (Sadbhavana Divas).
-    expect(parsed.parsed, 3202);
-    expect(parsed.skipped, 1689);
-    expect(parsed.formatCounts['block'], 3177);
-    expect(parsed.answerSources['answer-line'], 3179);
+    // 20 Nov 2026 (was 3202/1689): numberless split + U+E000 fix +
+    // E-option guard + unfinished-question fix recover 10 more real
+    // questions (block 3177→3180, answer-line 3179→3184; q-only
+    // 8→11, table 17→21). Skipped 1689→1688.
+    expect(parsed.parsed, 3212);
+    expect(parsed.skipped, 1688);
+    expect(parsed.formatCounts['block'], 3180);
+    expect(parsed.answerSources['answer-line'], 3184);
     expect(totalMs, lessThan(30000));
     // Spot-check: parsed questions are well-formed.
     expect(parsed.questions.first.options.length, 4);

@@ -4,6 +4,7 @@ import '../models/exam.dart';
 import '../models/question.dart';
 import 'answer_key.dart';
 import 'book_structure.dart';
+import 'paper_identity.dart';
 
 /// Parses MCQs from plain text (pasted text, .txt file, text extracted
 /// from a PDF, or OCR output) into [Question]s.
@@ -166,6 +167,7 @@ class ParseResult {
     this.noiseLinesFiltered = 0,
     this.facts = const [],
     this.answerPending = const [],
+    this.keyPaperReport = const [],
   });
 
   final List<Question> questions;
@@ -291,6 +293,13 @@ class ParseResult {
   /// EXPLICIT user choice — these are never guessed silently, and
   /// they are never counted in [parsed].
   final List<PendingQuestion> answerPending;
+
+  /// Plain-language key-paper report for the preview: per-paper
+  /// attribution ("Key 'Paper 60' se 42 jawab lage.") plus any key
+  /// whose named paper has no questions in the import ("Key 'Paper
+  /// 60' mili, lekin is PDF mein Paper 60 ke sawal nahi — key nahi
+  /// lagayi."). Strict paper rule, owner 20 Nov 2026.
+  final List<String> keyPaperReport;
 }
 
 /// One question that has an answer but no options yet.
@@ -592,6 +601,22 @@ class TableParseResult {
 /// "E" is included because a 5-option table's key can be E.
 final _tableKeyLetterRe = RegExp(r'^\(?\s*([A-Ea-e])\s*[\)\.\:]?\s*$');
 
+/// An option marker inside an option cell ("A. Latin", "B) German",
+/// "(C) French" — the Computer-questions table, 20 Nov 2026). Group 1
+/// is the marker letter, group 2 the option text. Same shape as the
+/// block parser's option lines; a bare single letter ("A") is NOT a
+/// marker (it can be the article "a" as an option value).
+final _optionMarkerRe = RegExp(r'^\(?([A-Da-d])[\)\.\:\-]\s*(.+)$');
+
+/// True when [t] is a page footer ("Page 1", "Page 1 of 71") — never
+/// table content, never a question stem.
+bool _isTablePageFooter(String t) {
+  return RegExp(
+    r'^page\s+\d+\s*(of\s+\d+)?\s*$',
+    caseSensitive: false,
+  ).hasMatch(t.trim());
+}
+
 /// A single A–D letter as an OPTION value: the article "a" is printed
 /// as "A" (row 27: options "A", "An", "The", "None of these"). "E" is
 /// never an option — it is always the key of a 5-option row.
@@ -746,6 +771,22 @@ bool _isTableSectionHeading(String line) {
   return RegExp(r'and\s+its\s+types\s*$', caseSensitive: false).hasMatch(t);
 }
 
+/// True when [line] looks like an in-table section-heading row
+/// ("Interjection", "Parts of Speech Identification",
+/// "Gerund / Infinitives / Participle" — the interjection table,
+/// 20 Nov 2026): short (≤ 45 chars, ≤ 8 words), no digits, no '?'
+/// or '!', not ending in '.'. The caller must ALSO require that the
+/// cell is alone on its line and the next cell is a bare Sr.#, so a
+/// real question stem (which shares its row's line and is followed
+/// by its options, never by a bare number) can never be eaten.
+bool _isTableHeadingRow(String line) {
+  final t = stripBoldMarkers(line).trim();
+  if (t.isEmpty || t.length > 45) return false;
+  if (RegExp(r'[0-9?!]').hasMatch(t)) return false;
+  if (t.endsWith('.')) return false;
+  return t.split(RegExp(r'\s+')).length <= 8;
+}
+
 /// True when [line] is a bare table column header ("Question",
 /// "Answer", "Type", "Key") — structure, never content.
 bool _isTableColumnHeader(String line) {
@@ -763,6 +804,13 @@ bool _isTableColumnHeader(String line) {
     'q no',
     's.no',
     'sr',
+    'sr.#',
+    'sr#',
+    'sr.no',
+    'sr. no',
+    'sr. #',
+    'ans',
+    'ans.',
     'no.',
   }.contains(t);
 }
@@ -962,6 +1010,7 @@ class _TableSink {
   final pending = <PendingQuestion>[];
   final consumed = <int>{};
   final conflicts = <String>[];
+  final errors = <String>[];
   var skipped = 0;
   var fiveOptionNormalised = 0;
   var fiveOptionAnswerE = 0;
@@ -983,6 +1032,14 @@ class _TableSink {
   /// prints the same value twice in one row) — the row is still usable
   /// when the key is unambiguous, so only an all-identical option set
   /// is rejected.
+  /// [number] is the row's book number (the Sr.# value, null when the
+  /// table prints none) and [paper] its paper segment — both ride
+  /// onto a pending row so a separately attached answer key can match
+  /// it by (paper, number). Option cells may carry their own letter
+  /// marker ("A. Latin"): the marker is stripped, and it must match
+  /// the column position — a mismatch makes the answer unverifiable,
+  /// so the row is left pending and the reason is reported in
+  /// [errors] (never silently reassigned).
   void addRow({
     required List<_TableCell> rowCells,
     required String questionText,
@@ -995,6 +1052,8 @@ class _TableSink {
     required Subject subject,
     required String sourceId,
     required String sourceLabel,
+    int? number,
+    required String paper,
   }) {
     for (final c in rowCells) {
       consumed.add(c.lineIndex);
@@ -1012,6 +1071,27 @@ class _TableSink {
         correct = m.group(1)!.toUpperCase().codeUnitAt(0) - 65;
       }
     }
+    // Option markers ("A. Latin" — the Computer-questions table):
+    // strip the marker (the stored option is "Latin") and verify it
+    // against the column position. A marker that disagrees with its
+    // column makes the key letter ambiguous — the key could mean a
+    // column or a marker — so the answer is distrusted below and the
+    // row is left pending, never guessed.
+    var markerMismatch = false;
+    final strippedOpts = <String>[];
+    for (var k = 0; k < opts.length; k++) {
+      final m = _optionMarkerRe.firstMatch(opts[k]);
+      if (m != null) {
+        final markerLetter =
+            m.group(1)!.toUpperCase().codeUnitAt(0) - 65;
+        if (markerLetter != k) markerMismatch = true;
+        strippedOpts.add(m.group(2)!.trim());
+      } else {
+        strippedOpts.add(opts[k]);
+      }
+    }
+    opts = strippedOpts;
+    if (markerMismatch) correct = -1;
     if (opts.length == 5) {
       if (correct < 0 || correct > 4) {
         opts = opts.sublist(0, 4);
@@ -1043,16 +1123,29 @@ class _TableSink {
     }
     var resolved = correct;
     var answerSource = '';
-    if (resolved < 0 && tickIndex != null) {
+    if (!markerMismatch && resolved < 0 && tickIndex != null) {
       resolved = tickIndex;
       answerSource = 'tick';
     }
-    if (resolved < 0 && boldIndex != null) {
+    if (!markerMismatch && resolved < 0 && boldIndex != null) {
       resolved = boldIndex;
       answerSource = 'bold';
     }
     if (resolved >= 0) {
       answerSource = keyLetter != null ? 'key' : answerSource;
+    }
+    if (markerMismatch) {
+      // The markers disagree with the columns: the answer cannot be
+      // verified, so the row stays pending (below) and the reason is
+      // reported in the preview via ParseResult.errors — never
+      // silently reassigned to another option.
+      final shortQ =
+          qText.length > 40 ? '${qText.substring(0, 40)}…' : qText;
+      errors.add(
+        'Table row "$shortQ": option markers disagree with the '
+        'columns (e.g. a "B." marker in the A column) — the answer '
+        'cannot be verified, so the row is left pending.',
+      );
     }
     if (keyLetter != null && correct >= 0) {
       final shortQ = qText.length > 40 ? '${qText.substring(0, 40)}…' : qText;
@@ -1095,7 +1188,11 @@ class _TableSink {
           subject: subject,
           page: page,
           part: part,
-          reason: 'no-key-entry',
+          reason: markerMismatch
+              ? 'option-marker-mismatch'
+              : 'no-key-entry',
+          number: number,
+          paper: paper,
         ),
       );
     }
@@ -1103,25 +1200,61 @@ class _TableSink {
 }
 
 /// The subject for a table row, from the nearest preceding section
-/// heading ("Adjective and its Types" → English). A non-grammar
-/// heading falls back to [fallback].
+/// heading ("Adjective and its Types" → English) or the table's title
+/// line ("Computer Most Important Questions" → Maths & Computer).
+/// A non-grammar heading falls back to [fallback] — never guessed.
+/// Keywords are topic words, not the book's title: 'computer' maps to
+/// Maths & Computer; English-grammar topics (interjection, gerund,
+/// participle, …) map to English.
 Subject _tableSubjectFor(
   List<_TableCell> allCells,
   int questionLineIndex,
   Subject fallback,
 ) {
+  // Cells per line (for the lone-line checks below).
+  final perLine = <int, int>{};
+  for (final c in allCells) {
+    perLine[c.lineIndex] = (perLine[c.lineIndex] ?? 0) + 1;
+  }
   var heading = '';
   for (final c in allCells) {
     if (c.lineIndex >= questionLineIndex) break;
-    if (_isTableSectionHeading(c.text)) heading = c.text;
+    // A section heading ("Adjective and its Types") or an in-table
+    // heading row ("Interjection", "Gerund / Infinitives /
+    // Participle") — the latter only when alone on its line.
+    if (_isTableSectionHeading(c.text) ||
+        (perLine[c.lineIndex] == 1 && _isTableHeadingRow(c.text))) {
+      heading = c.text;
+    }
   }
-  final lower = heading.toLowerCase();
+  // The table title: the first line, when it is a lone cell (it is not
+  // a section heading, so the loop above never catches it).
+  var title = '';
+  if (allCells.isNotEmpty) {
+    final firstLine = allCells
+        .map((c) => c.lineIndex)
+        .reduce((a, b) => a < b ? a : b);
+    if (perLine[firstLine] == 1) {
+      title =
+          allCells.firstWhere((c) => c.lineIndex == firstLine).text;
+    }
+  }
+  final lower = '$heading $title'.toLowerCase();
+  if (lower.contains('computer')) return Subject.mathsComputer;
   if (lower.contains('adjective') ||
       lower.contains('article') ||
       lower.contains('noun') ||
       lower.contains('verb') ||
       lower.contains('adverb') ||
       lower.contains('pronoun') ||
+      lower.contains('interjection') ||
+      lower.contains('gerund') ||
+      lower.contains('participle') ||
+      lower.contains('infinitive') ||
+      lower.contains('tense') ||
+      lower.contains('preposition') ||
+      lower.contains('conjunction') ||
+      lower.contains('parts of speech') ||
       lower.contains('grammar') ||
       lower.contains('english')) {
     return Subject.english;
@@ -1260,6 +1393,7 @@ TableParseResult _parseTableColumnWise(
       tickIndex: tickIndex,
       boldIndex: boldIndex,
       page: qCells.first.page,
+      paper: qCells.first.paper,
       part: structure?.partForLine(qCells.first.lineIndex) ?? '',
       subject: _tableSubjectFor(
         cells,
@@ -1285,6 +1419,7 @@ TableParseResult _parseTableColumnWise(
     pending: sink.pending,
     consumedLineIndices: sink.consumed,
     skipped: sink.skipped,
+    errors: sink.errors,
     conflicts: sink.conflicts,
     fiveOptionNormalised: sink.fiveOptionNormalised,
     fiveOptionAnswerE: sink.fiveOptionAnswerE,
@@ -1342,7 +1477,22 @@ bool _isTableAnchorLabel(String line) {
   );
 }
 
-/// True when [line] could be an option value in a table row: 1–8
+/// True when [line] looks like a trailing topic-label cell right
+/// after a row's key letter ("Gerund", "Identification of Parts of
+/// Speech", "Corelative Conjunction" — the interjection table,
+/// 20 Nov 2026): short (≤ 45 chars, ≤ 5 words), no digits, no '?'.
+/// Looser than [_isTableTypeLabel] (the vocabulary cannot know every
+/// topic) — the caller must ALSO require the same line as the key, so
+/// a following row's stem can never be eaten.
+bool _isTableTrailingLabel(String line) {
+  final t = stripBoldMarkers(line).trim();
+  if (t.isEmpty || t.length > 45) return false;
+  if (RegExp(r'[0-9?]').hasMatch(t)) return false;
+  if (_tableKeyLetterRe.hasMatch(t)) return false;
+  return t.split(RegExp(r'\s+')).length <= 5;
+}
+
+/// True when [line] could be an option value in a table row: 1–10
 /// words, 3–60 chars, no letter prefix ("A) …" is a standard block,
 /// not a table row), not a type label, not a heading, and not a
 /// question tail. A line ending in '?' is a question, never an option;
@@ -1369,6 +1519,11 @@ bool _isTableOptionLine(String line) {
     return false;
   }
   if (_tableArticleLetterRe.hasMatch(t)) return true;
+  // The pronoun "I" as an option value ("I", "Helped", "Him",
+  // "I helped" — the interjection table Q243/Q244, 20 Nov 2026). A
+  // question stem is never a lone "I" (it fails
+  // [_looksLikeCompleteQuestion]), so this cannot eat a stem.
+  if (t == 'I' || t == 'i') return true;
   // A bare number ("3", "42") is a numeric option value — the maths
   // row "What is 2 + 2?" has options 3/4/5/6. (The segmenter keeps
   // bare-digit runs of ≥ 3 for exactly this; see [_isNumericOptionRun]
@@ -1379,7 +1534,11 @@ bool _isTableOptionLine(String line) {
   // other than A–D are not options.
   if (t.length < 2 || t.length > 60) return false;
   final words = t.split(RegExp(r'\s+'));
-  if (words.isEmpty || words.length > 8) return false;
+  // 10, not 8: a real option reaches 9 words ("right click worksheet
+  // range object & choose format object" — the computer table Q80,
+  // 20 Nov 2026). The key anchor after the run is what confirms the
+  // row, not the option length.
+  if (words.isEmpty || words.length > 10) return false;
   if (t.endsWith('?')) return false;
   if (t.endsWith(':') && t.length < 15) return false;
   if (_optionRe.hasMatch(t)) return false;
@@ -1404,11 +1563,43 @@ bool _looksLikeCompleteQuestion(String bufferText) {
 /// 4 options the next single letter is the key, not a 5th option — the
 /// run stops there so the anchor can read it. Returns the run
 /// (possibly empty). Pure lookahead — consumes nothing.
-List<_TableCell> _collectTableOptionRun(List<_TableCell> cells, int i) {
+List<_TableCell> _collectTableOptionRun(
+  List<_TableCell> cells,
+  int i,
+  Map<int, int> cellsPerLine,
+) {
   final run = <_TableCell>[];
   for (var k = i; k < cells.length && run.length < 5; k++) {
     if (_tableKeyLetterRe.hasMatch(cells[k].text) && run.length >= 4) break;
-    if (!_isTableOptionLine(cells[k].text)) break;
+    final cellText = cells[k].text;
+    // The trailing topic-label cell ("Gerund", "Infinitive" — the
+    // interjection table, 20 Nov 2026) is option-like, so without
+    // this it is swallowed as a 5th option and a key-less row loses
+    // its anchor entirely. Stop the run at 4 when the next cell
+    // looks like a label on the same line and the cell after it is
+    // the next row's Sr.# (a bare number): a genuine 5th option is
+    // followed by its key letter, never by a bare number.
+    if (run.length == 4 &&
+        k + 1 < cells.length &&
+        cells[k].lineIndex == run.last.lineIndex &&
+        _isTableTrailingLabel(cellText) &&
+        RegExp(r'^\d{1,4}$').hasMatch(cells[k + 1].text)) {
+      break;
+    }
+    var optionLike = _isTableOptionLine(cellText);
+    if (!optionLike && (cellsPerLine[cells[k].lineIndex] ?? 0) > 1) {
+      // An option cell with an explicit marker ("A. Home tab" — the
+      // Computer table, 20 Nov 2026) is an option when it sits on a
+      // multi-cell ('|') line: the marker + the row structure prove
+      // it. On a lone line, "A. ..." is a standard-block option line
+      // and must stay out of the table pass (see
+      // [_isTableOptionLine]). The marker is stripped first so the
+      // content is judged as a bare option.
+      final m =
+          _optionMarkerRe.firstMatch(stripBoldMarkers(cellText).trim());
+      if (m != null) optionLike = _isTableOptionLine(m.group(2)!);
+    }
+    if (!optionLike) break;
     run.add(cells[k]);
   }
   return run;
@@ -1439,6 +1630,69 @@ TableParseResult _parseTableRowWise(
   var buffer = <_TableCell>[];
   var bufferText = '';
   var bufferEndsColon = false;
+  // The Sr.# value of the row being built (null when unknown).
+  int? rowNumber;
+  // Cells per source line: an in-table section heading is alone on
+  // its line, a data row never is.
+  final cellsPerLine = <int, int>{};
+  for (final c in cells) {
+    cellsPerLine[c.lineIndex] = (cellsPerLine[c.lineIndex] ?? 0) + 1;
+  }
+  // Header lines and title lines (Sr.# table, 20 Nov 2026): a line is
+  // a header line when any of its cells is a column header ("Sr.#",
+  // "Question", "Ans"); a lone line immediately before a header line
+  // is the table's title ("Computer Most Important Questions"). Both
+  // are skipped in the loop below — without this, the title buffers
+  // as a stem and pairs with the header's A–D as options, a spurious
+  // pending question (OCR probe verdict). A title never ends with
+  // '?' / '؟' / ':' and is never a question start — an instruction
+  // stem ("Choose the correct answer:") is protected by that.
+  final headerLines = <int>{};
+  for (final c in cells) {
+    if (_isTableColumnHeader(c.text)) headerLines.add(c.lineIndex);
+  }
+  final titleLines = <int>{};
+  {
+    final lineOrder = <int>[];
+    for (final c in cells) {
+      if (lineOrder.isEmpty || lineOrder.last != c.lineIndex) {
+        lineOrder.add(c.lineIndex);
+      }
+    }
+    for (var k = 0; k + 1 < lineOrder.length; k++) {
+      if (cellsPerLine[lineOrder[k]] == 1 &&
+          headerLines.contains(lineOrder[k + 1])) {
+        final t = cells
+            .firstWhere((c) => c.lineIndex == lineOrder[k])
+            .text
+            .trim();
+        if (!t.endsWith('?') &&
+            !t.endsWith('؟') &&
+            !t.endsWith(':') &&
+            _questionNumber(t) == null) {
+          titleLines.add(lineOrder[k]);
+        }
+      }
+    }
+  }
+  // Row-number trust (interjection table, 20 Nov 2026): the book's
+  // own Sr.# can be wrong (162, 164 after 251/253). A number is
+  // trusted only when it exceeds every earlier number (a new
+  // maximum); anything else is out of sequence and must never join
+  // an answer by number, so the row carries no number. Answered
+  // rows are unaffected — their Ans letter is positional, in-row.
+  var maxRowNumber = 0;
+  String? numberingBreak;
+  void recordSerial(int n) {
+    if (n > maxRowNumber) {
+      maxRowNumber = n;
+      rowNumber = n;
+    } else {
+      numberingBreak ??= '$n after $maxRowNumber';
+      rowNumber = null;
+    }
+  }
+
   var i = 0;
   while (i < cells.length) {
     final cell = cells[i];
@@ -1447,9 +1701,59 @@ TableParseResult _parseTableRowWise(
       i++;
       continue;
     }
+    // Title line (see above): never content. Consumed, so the block
+    // pass never sees it either.
+    if (titleLines.contains(cell.lineIndex)) {
+      sink.consumed.add(cell.lineIndex);
+      i++;
+      continue;
+    }
+    // A header row's A–D cells are column labels, not options. (The
+    // header line is recognised by its other cells — "Sr.#",
+    // "Question", "Ans" — so a data row's single-letter options are
+    // unaffected: they sit on data lines, never header lines.)
+    if (headerLines.contains(cell.lineIndex) &&
+        _tableKeyLetterRe.hasMatch(t)) {
+      i++;
+      continue;
+    }
+    // A page footer ("Page 1 of 71") is never content — skip it so
+    // it cannot join the next row's stem.
+    if (_isTablePageFooter(t)) {
+      i++;
+      continue;
+    }
+    // An in-table section heading ("Interjection", "Parts of Speech
+    // Identification" — the interjection table, 20 Nov 2026): a lone
+    // short phrase on its own line, followed by the next row's Sr.#.
+    // Without this, the heading buffers into the next row's stem.
+    // The guards keep real stems safe: a stem is never alone on its
+    // line in a '|' table (its row shares the line), and a stem is
+    // never followed by a bare number (its options follow it).
+    if (buffer.isEmpty &&
+        cellsPerLine[cell.lineIndex] == 1 &&
+        _isTableHeadingRow(t) &&
+        i + 1 < cells.length &&
+        RegExp(r'^\d{1,4}$').hasMatch(cells[i + 1].text)) {
+      sink.consumed.add(cell.lineIndex);
+      i++;
+      continue;
+    }
+    // A bare serial number ("1", "27") with an empty question buffer
+    // is the Sr.# column value, not a question start — record it as
+    // the row's number and skip it, so it never joins the stem.
+    // (A stem that genuinely opens with a bare year would lose it
+    // here — the same documented ambiguity as
+    // [_stripQuestionNumberPrefix]; a Sr.# column is far more common
+    // in these tables than a year-opening stem.)
+    if (buffer.isEmpty && RegExp(r'^\d{1,4}$').hasMatch(t)) {
+      recordSerial(int.parse(t));
+      i++;
+      continue;
+    }
     // A row starts only after a complete-looking question.
     if (buffer.isNotEmpty && _looksLikeCompleteQuestion(bufferText)) {
-      var run = _collectTableOptionRun(cells, i);
+      var run = _collectTableOptionRun(cells, i, cellsPerLine);
       if (run.length == 4 || run.length == 5) {
         var j = i + run.length;
         String? keyLetter;
@@ -1459,6 +1763,22 @@ TableParseResult _parseTableRowWise(
           j++;
         }
         if (j < cells.length && _isTableAnchorLabel(cells[j].text)) {
+          typeLabel = cells[j].text;
+          j++;
+        }
+        // Trailing topic-label column ("Gerund", "Identification of
+        // Parts of Speech" — the interjection table, 20 Nov 2026):
+        // the cell right after the key, on the SAME line, that looks
+        // like a label belongs to this row even when the label
+        // vocabulary does not know the words. Without this, the label
+        // buffers into the next row's stem. The same-line guard is
+        // what keeps a following row's stem safe: a stem lives on its
+        // own line. (Deliberately NOT used in the 5-cell recovery
+        // below: there a short 5th cell can be a real 5th option.)
+        if (typeLabel == null &&
+            j < cells.length &&
+            cells[j].lineIndex == cells[j - 1].lineIndex &&
+            _isTableTrailingLabel(cells[j].text)) {
           typeLabel = cells[j].text;
           j++;
         }
@@ -1490,7 +1810,7 @@ TableParseResult _parseTableRowWise(
               buffer.add(run.first);
               bufferText = '$bufferText ${run.first.text}'.trim();
               bufferEndsColon = false;
-              run = _collectTableOptionRun(cells, i + 1);
+              run = _collectTableOptionRun(cells, i + 1, cellsPerLine);
               if (run.length != 4) {
                 // Not a row after all — the "options" were a wrap.
                 i++;
@@ -1505,6 +1825,13 @@ TableParseResult _parseTableRowWise(
                 j++;
               }
               if (j < cells.length && _isTableAnchorLabel(cells[j].text)) {
+                typeLabel = cells[j].text;
+                j++;
+              }
+              if (typeLabel == null &&
+                  j < cells.length &&
+                  cells[j].lineIndex == cells[j - 1].lineIndex &&
+                  _isTableTrailingLabel(cells[j].text)) {
                 typeLabel = cells[j].text;
                 j++;
               }
@@ -1540,6 +1867,8 @@ TableParseResult _parseTableRowWise(
             tickIndex: tickIndex,
             boldIndex: boldIndex,
             page: buffer.first.page,
+            number: rowNumber,
+            paper: buffer.first.paper,
             part: structure?.partForLine(buffer.first.lineIndex) ?? '',
             subject: _tableSubjectFor(
               cells,
@@ -1552,6 +1881,7 @@ TableParseResult _parseTableRowWise(
           buffer = [];
           bufferText = '';
           bufferEndsColon = false;
+          rowNumber = null;
           i = j;
           continue;
         }
@@ -1578,8 +1908,15 @@ TableParseResult _parseTableRowWise(
     // 3 lines / 200 chars was too tight — a full example sentence as
     // a stem wraps to 3 lines and can exceed 200 chars.)
     if (buffer.length >= 4 || bufferText.length > 400) {
-      buffer = [cell];
-      bufferText = t;
+      if (RegExp(r'^\d{1,4}$').hasMatch(t)) {
+        recordSerial(int.parse(t));
+        buffer = [];
+        bufferText = '';
+      } else {
+        buffer = [cell];
+        bufferText = t;
+        rowNumber = null;
+      }
       bufferEndsColon = t.trim().endsWith(':');
       i++;
       continue;
@@ -1588,6 +1925,13 @@ TableParseResult _parseTableRowWise(
     bufferText = bufferText.isEmpty ? t : '$bufferText $t';
     bufferEndsColon = t.trim().endsWith(':');
     i++;
+  }
+  if (numberingBreak != null) {
+    sink.errors.add(
+      'Table Sr.# out of sequence ($numberingBreak) — out-of-sequence '
+      'row numbers cannot be trusted, so those rows carry no number '
+      'for key matching. They can still be answered by hand.',
+    );
   }
   final totalRows = sink.questions.length + sink.pending.length;
   if (totalRows < 2) {
@@ -1607,7 +1951,9 @@ TableParseResult _parseTableRowWise(
     return const TableParseResult();
   }
   for (final c in cells) {
-    if (_isTableSectionHeading(c.text) || _isTableColumnHeader(c.text)) {
+    if (_isTableSectionHeading(c.text) ||
+        _isTableColumnHeader(c.text) ||
+        _isTablePageFooter(c.text)) {
       sink.consumed.add(c.lineIndex);
     }
   }
@@ -1616,6 +1962,7 @@ TableParseResult _parseTableRowWise(
     pending: sink.pending,
     consumedLineIndices: sink.consumed,
     skipped: sink.skipped,
+    errors: sink.errors,
     conflicts: sink.conflicts,
     fiveOptionNormalised: sink.fiveOptionNormalised,
     fiveOptionAnswerE: sink.fiveOptionAnswerE,
@@ -1723,6 +2070,35 @@ ParseResult _parseImpl(
   // Declared here (not in the second pass) so the first pass can
   // count key entries it consumes for tick/bold questions (below).
   var keyEntriesApplied = 0;
+  // Per-paper key attribution for the preview ("Key 'Paper 60' se N
+  // jawab lage") — incremented wherever keyEntriesApplied is.
+  final keyAppliedByPaper = <String, int>{};
+  // MASTER DIRECTIVE Part 8 (20 Nov 2026): every in-book key join
+  // goes through decideKeyMatch (see keyMatchDecisions in
+  // answer_key.dart). Only VERIFIED auto-assigns silently; HIGH
+  // CONFIDENCE is applied but flagged in keyPaperReport — the upload
+  // preview shows the flag and the user's Save is the confirmation
+  // (the parser runs before the preview, so the preview + Save is
+  // the only existing confirmation path for an in-book key).
+  // NEEDS REVIEW / UNVERIFIED / MISMATCH are never applied: their
+  // entries are withheld HERE — removed from the join map, so the
+  // joins below see no token, the entries are never reported as
+  // "unmatched", and the decision reason is reported in
+  // keyPaperReport instead.
+  final keyDecisions = keyMatchDecisions(
+    segmented,
+    sourceDocumentId: sourceId,
+  );
+  final withheldKeyDecisions = <String, KeyMatchDecision>{};
+  for (final e in keyDecisions.entries) {
+    final d = e.value;
+    final applies = d.mayAutoAssign ||
+        d.confidence == KeyMatchConfidence.highConfidence;
+    if (!applies) {
+      withheldKeyDecisions[e.key] = d;
+      segmented.keyEntries.remove(e.key);
+    }
+  }
   // 5→4 normalisation (Examveda), number gaps (MPT), noise filter
   // (Examveda / organisation), fact cards (organisation).
   var fiveOptionNormalised = 0;
@@ -1748,6 +2124,34 @@ ParseResult _parseImpl(
   // Answer-pending questions for AI inference (v1.2): 4 options, no
   // usable answer. Filled by the "?" branches and the unanswered loop.
   final pending = <PendingQuestion>[];
+  // The missing-answers report, built alongside the pending list
+  // (PPSC-66 §5.5, 20 Nov 2026): one entry per pending question, in
+  // the same order — so the report and the pending list can never
+  // disagree (the old code built the report from skipped blocks:
+  // Q10 appeared twice, Q2 not at all, and '?' / marker-mismatch
+  // pendings were missing entirely). [addPending] is the only way
+  // to create a pending question in this function; the table pass
+  // pendings are noted at the merge below. The wording matches the
+  // old report exactly for the cases it covered.
+  final questionsMissingAnswers = <String>[];
+  void noteMissingAnswer(PendingQuestion p, {String? failedToken}) {
+    final label = p.number != null
+        ? '${p.paper} Q${p.number}'
+        : '${p.paper} (unnumbered)';
+    final detail = failedToken != null
+        ? '— key entry "$failedToken" matches no option'
+        : p.reason == 'unknown-key'
+            ? '— answer unknown (the answer key says "?")'
+            : p.reason == 'option-marker-mismatch'
+                ? '— option markers disagree, answer not trusted'
+                : '— no key entry';
+    questionsMissingAnswers.add('$label $detail');
+  }
+
+  void addPending(PendingQuestion p, {String? failedToken}) {
+    pending.add(p);
+    noteMissingAnswer(p, failedToken: failedToken);
+  }
 
   // Split into blocks: a new block starts at a question line.
   // A worked-solution block ("Solution:" … "Final Answer:") is one
@@ -1770,6 +2174,44 @@ ParseResult _parseImpl(
         found++;
         if (found >= 2) return true;
       }
+    }
+    return false;
+  }
+
+  // The FIRST option line must be close (within 4 lines of the
+  // candidate stem): a genuine stem's own options follow almost
+  // immediately — a second stem line, or one junk line
+  // ("Mcqsplanet.com"), at most. An explanation-prose line only
+  // "sees" the NEXT question's options, 8 lines away — splitting
+  // there cuts the current question's prose into the next block and
+  // traps the next stem behind it in a prose-first block that can
+  // never split again (it has no options yet when the stem arrives),
+  // so the trapped question's text ends with prose, not '?', and the
+  // pending gate fails. F2 lost 18 pending items exactly this way
+  // (a prose line split item 1's block; item 2's stem then sat in
+  // the prose-first block and vanished).
+  //
+  // Length is the second half of the guard: prose lines are long
+  // full-width sentences (>70 chars), while genuine stems and their
+  // wraps are short instruction lines. If ANY line between the
+  // candidate and its first option is long, this is a prose run, not
+  // a stem run — do not split. (A genuine long stem in a full-width
+  // book would also be blocked; it then merges as it did before the
+  // numberless split existed — a missed question, never a
+  // fabrication.)
+  //
+  // Count is the third half: at most TWO non-option lines may sit
+  // between the candidate and its first option (a wrapped second
+  // stem line + one junk line). Short prose defeats the distance
+  // guard alone — a 1-line prose paragraph + a 1-line stem puts the
+  // next option 4 lines from the prose line — but then the next
+  // stem is ALSO between them, so the count exceeds two and the
+  // split is blocked.
+  bool firstOptionClose(List<SegmentedLine> lines, int from) {
+    for (var j = from; j < lines.length && j < from + 4; j++) {
+      final t = _cleanStored(lines[j].text);
+      if (_optionRe.hasMatch(t)) return j - from <= 2;
+      if (t.length > 70) return false;
     }
     return false;
   }
@@ -1802,7 +2244,9 @@ ParseResult _parseImpl(
       }
     }
   }
-  if (table.pending.isNotEmpty) pending.addAll(table.pending);
+  for (final p in table.pending) {
+    addPending(p);
+  }
   skipped += table.skipped;
   errors.addAll(table.errors);
   conflicts.addAll(table.conflicts);
@@ -1837,16 +2281,113 @@ ParseResult _parseImpl(
   bool isBareNumberQuestionStart(String clean) =>
       (clean.endsWith('?') || clean.endsWith('؟')) &&
       RegExp(r'^\d+\s+(?![a-z0-9])').hasMatch(clean);
+  // True once the current block was started by a split at a question
+  // start (numbered, bare-number, '?' or numberless — see below).
+  // The initial block is front matter until proven otherwise; a block
+  // created by a split IS a question in progress, even when its first
+  // line is a numberless stem that matches no question-start regex
+  // (PPSC-66 Q2: "Change the voice of the following sentence:" +
+  // "Are they blaming us for nothing?" — the second line must NOT
+  // split the stem in two).
+  var currentIsQuestion = false;
+  bool currentHasOptions() => current.any(
+        (l) => _optionRe.hasMatch(_cleanStored(l.text)),
+      );
+  // A plausible question-stem start: more than one word, not a bare
+  // domain / junk line ("Mcqsplanet.com", "International"), not a
+  // digit start ("92.97m at the Paris 2024 Games." is prose, and a
+  // numbered question matches [questionStart] instead), and short
+  // enough to be an instruction line rather than a full-width prose
+  // sentence. Used both to keep junk/prose lines from STARTING a
+  // numberless split and to tell whether a split-created block is
+  // really a question in progress (F2: a block starting with prose
+  // or junk is not — a '?' tail inside it must still split, so the
+  // question survives as the fragment pending it always was).
+  bool isPlausibleStemStart(String clean) {
+    if (clean.isEmpty) return false;
+    if (!clean.contains(' ')) return false;
+    if (clean.length > 70) return false;
+    if (RegExp(r'^[0-9]').hasMatch(clean)) return false;
+    return true;
+  }
+
   bool currentIsUnfinishedQuestion() {
     if (current.isEmpty) return false;
     final first = _cleanStored(current.first.text);
-    if (!questionStart.hasMatch(first) &&
+    if (!currentIsQuestion &&
+        !questionStart.hasMatch(first) &&
         !isUnnumberedQuestionStart(first)) {
       return false; // Front matter / header — not a question.
     }
-    return !current.any(
-      (l) => _optionRe.hasMatch(_cleanStored(l.text)),
-    );
+    // A numbered first line ("Q177. …") or an unnumbered '?' stem
+    // is a question whatever its length: the ≤70 plausibility cap
+    // is only for NUMBERLESS, non-'?' first lines (F2 prose/junk).
+    // Without this, a long numbered stem (>70 chars) was judged
+    // "not a question", so its '?' tail split it away from its head
+    // (MPT Q177/Q116: head stranded in the previous block, tail
+    // parsed as a fragment, key entry unmatched).
+    if (currentIsQuestion &&
+        !questionStart.hasMatch(first) &&
+        !isUnnumberedQuestionStart(first) &&
+        !isPlausibleStemStart(first)) {
+      return false; // Split-created, but starts with junk/prose —
+      // not a question in progress; a '?' tail may split it.
+    }
+    return !currentHasOptions();
+  }
+  // A numberless stem line (PPSC-66 p1: "Give the meaning of Idiom:
+  // Spick and Span", "Choose the correct synonym Wheedle:"): not an
+  // option, not an answer line, not a numbered/'?' start (those are
+  // handled by the branches above). Only ever used as a split
+  // trigger together with [currentHasAllOptions] (the previous
+  // question is done — a wrap comes BEFORE the options, never after)
+  // and [optionsFollow] (a real question's options follow).
+  //
+  // A wrapped option's tail is NOT a stem (PPSC-66 Q13: "(B) Should
+  // the poor be looked down upon by" / "you?" — the tail is short,
+  // ends with '?', and the block already has options, so without
+  // this guard it splits the question in two and both halves fail).
+  // The tail continues the block's last option line — reuse the
+  // standard parser's continuation test.
+  //
+  // Two more guards (20 Nov 2026, found by the full suite):
+  // (a) never split an UNFINISHED block — a stem-like line inside a
+  // question with fewer than 4 option lines is a running head or a
+  // continuation, not a new question (cross_page: "Current Affairs"
+  // at the top of page 2, inside Q7 which only had (A)/(B) so far —
+  // splitting there cut the question in half and both halves died).
+  // Only a block with all 4 option lines is a finished question.
+  // (b) never split on a metadata line — "Explanation: ..." and
+  // "Subject: ..." belong to the CURRENT question (mcq_parser_test:
+  // splitting at "Explanation: Islamabad became the capital in
+  // 1967." cut Q1's block before its "Subject: Pakistan Studies"
+  // line, so Q1 lost its subject).
+  bool currentHasAllOptions() =>
+      current.where((l) => _optionRe.hasMatch(_cleanStored(l.text))).length >=
+      4;
+  bool isOptionContinuationLine(String clean) {
+    for (var k = current.length - 1; k >= 0; k--) {
+      final t = _cleanStored(current[k].text);
+      if (_optionRe.hasMatch(t)) return _isOptionContinuation(t, clean);
+    }
+    return false;
+  }
+  bool isNumberlessStemStart(String clean) {
+    if (clean.isEmpty) return false;
+    if (!isPlausibleStemStart(clean)) return false;
+    if (_optionRe.hasMatch(clean)) return false;
+    // A 5th option ("E. None of these") is an OPTION, not a stem:
+    // without this the split cut 5-option questions apart after D,
+    // and the orphaned "E. …" line became a fake q-only question
+    // (Examveda: 15+ "E. …" fabrications, and the parent question
+    // lost its E option — and its answer when the answer was E).
+    if (_optionERe.hasMatch(clean)) return false;
+    if (_answerLineRe.hasMatch(clean)) return false;
+    if (_explanationRe.hasMatch(clean)) return false;
+    if (_subjectRe.hasMatch(clean)) return false;
+    if (questionStart.hasMatch(clean)) return false;
+    if (isUnnumberedQuestionStart(clean)) return false;
+    return true;
   }
 
   for (var li = 0; li < qLines.length; li++) {
@@ -1875,6 +2416,7 @@ ParseResult _parseImpl(
         if (current.isNotEmpty) {
           blocks.add(current);
           current = <SegmentedLine>[];
+          currentIsQuestion = true;
         }
         current.add(line);
         continue;
@@ -1888,16 +2430,115 @@ ParseResult _parseImpl(
         current.isNotEmpty) {
       blocks.add(current);
       current = <SegmentedLine>[];
+      currentIsQuestion = true;
     } else if (isUnnumberedQuestionStart(cleanLine) &&
         optionsFollow(qLines, li + 1) &&
         current.isNotEmpty &&
         !currentIsUnfinishedQuestion()) {
       blocks.add(current);
       current = <SegmentedLine>[];
+      currentIsQuestion = true;
+    } else if (isNumberlessStemStart(cleanLine) &&
+        !isOptionContinuationLine(cleanLine) &&
+        firstOptionClose(qLines, li + 1) &&
+        optionsFollow(qLines, li + 1) &&
+        current.isNotEmpty &&
+        currentHasAllOptions()) {
+      // Numberless stem after a finished question (PPSC-66 p1: Q3–Q9
+      // have no number in the OCR — their stems were swallowed into
+      // the previous question's block and vanished). A junk line here
+      // only forms a block with no usable question, which is skipped,
+      // never fabricated.
+      blocks.add(current);
+      current = <SegmentedLine>[];
+      currentIsQuestion = true;
     }
     current.add(line);
   }
   if (current.isNotEmpty) blocks.add(current);
+
+  // Number recovery from sequence position (PPSC-66, 20 Nov 2026):
+  // page-edge clipping drops the question numbers (Q1, Q3–Q9 have no
+  // number in the OCR), and a numberless block can never join its key
+  // entry by number. A run of numberless OPTION-bearing blocks (only
+  // those can become questions — junk blocks never consume a number)
+  // is numbered by interpolation, ONLY when the run length exactly
+  // fills the gap between its numbered neighbours; a leading run
+  // before the first numbered block counts back from it (numbering
+  // starts at 1). Any mismatch leaves the numbers null — never
+  // guess. A trailing run (after the last numbered block) is left
+  // null too: a new section may restart numbering there, and
+  // guessing forward would join the wrong key entries.
+  final recoveredNumbers = List<int?>.filled(blocks.length, null);
+  {
+    int? blockNumber(int i) {
+      final first = blocks[i].first.text;
+      final clean = _cleanStored(first);
+      return _questionNumber(first) ??
+          (isBareNumberQuestionStart(clean)
+              ? int.tryParse(
+                  RegExp(r'^\d+').firstMatch(clean)!.group(0)!,
+                )
+              : null);
+    }
+
+    // Group by the paper of the block's first OPTION line, not its
+    // first line: a block that opens with front matter ("Papers of
+    // 2021 521", before the "MODEL PAPER 66" heading) carries the
+    // default paper on that line, while its question — and its
+    // options — belong to the paper that follows. Grouping by the
+    // first line stranded Q1 under "Paper 1" and broke the whole
+    // leading run (Q1–Q9 never recovered their numbers).
+    String blockPaper(int i) {
+      for (final l in blocks[i]) {
+        if (_optionRe.hasMatch(_cleanStored(l.text))) return l.paper;
+      }
+      return blocks[i].first.paper;
+    }
+
+    final byPaper = <String, List<int>>{};
+    for (var i = 0; i < blocks.length; i++) {
+      if (blocks[i].any(
+        (l) => _optionRe.hasMatch(_cleanStored(l.text)),
+      )) {
+        byPaper.putIfAbsent(blockPaper(i), () => []).add(i);
+      }
+    }
+    for (final indices in byPaper.values) {
+      int? lastKnown;
+      var i = 0;
+      while (i < indices.length) {
+        final n = blockNumber(indices[i]);
+        if (n != null) {
+          lastKnown = n;
+          i++;
+          continue;
+        }
+        var j = i;
+        while (j < indices.length && blockNumber(indices[j]) == null) {
+          j++;
+        }
+        final runLen = j - i;
+        final next = j < indices.length ? blockNumber(indices[j]) : null;
+        if (next != null &&
+            lastKnown != null &&
+            next - lastKnown - 1 == runLen) {
+          for (var k = 0; k < runLen; k++) {
+            recoveredNumbers[indices[i + k]] = lastKnown + 1 + k;
+          }
+        } else if (next != null &&
+            lastKnown == null &&
+            next - 1 == runLen) {
+          for (var k = 0; k < runLen; k++) {
+            recoveredNumbers[indices[i + k]] = k + 1;
+          }
+        }
+        // Otherwise ambiguous (gap != run length, or trailing run):
+        // leave null — never guess.
+        i = j;
+      }
+    }
+  }
 
   void bump(String format) {
     formatCounts[format] = (formatCounts[format] ?? 0) + 1;
@@ -2046,7 +2687,7 @@ ParseResult _parseImpl(
         unknown: true,
       );
     }
-    final keyCorrect = _resolveAnswer(token, options);
+    final keyCorrect = resolveAnswerToken(token, options);
     String letter(int i) => String.fromCharCode(65 + i);
     if (keyCorrect == null) {
       conflicts.add(
@@ -2086,6 +2727,7 @@ ParseResult _parseImpl(
       );
     }
     keyEntriesApplied++;
+    keyAppliedByPaper[paper] = (keyAppliedByPaper[paper] ?? 0) + 1;
     return (correctIndex: keyCorrect, answerSource: 'key', unknown: false);
   }
 
@@ -2096,7 +2738,8 @@ ParseResult _parseImpl(
     // them, and attach them to this block's question (or, when the
     // block yields no question, to the nearest preceding question).
     final noteTexts = <String>[];
-    final block = <SegmentedLine>[];
+    // Non-final: the title-furniture trim below may drop leading lines.
+    var block = <SegmentedLine>[];
     for (final l in rawBlock) {
       final note = noteContent(l.text);
       if (note != null) {
@@ -2110,8 +2753,79 @@ ParseResult _parseImpl(
       attachOrphanNotes(noteTexts, 'Block ${b + 1}');
       continue;
     }
+    // Title furniture at the head of a block (PPSC-66 Q1: the book's
+    // title block — "TEHSILDAR/ …", "(BS-16) - 2021", "English
+    // Morning", "English Grammar" — sits in front of the first
+    // question's stem, so the stem came out as the title instead of
+    // the question). The real stem is the first line before the
+    // options that is a question start, ends with '?'/'؟', or has ≥ 4
+    // words; leading lines before it that are all-caps or short
+    // (≤ 3 words) title lines are furniture, never the question. A
+    // genuine short stem ("Translate: Apple") has no longer stem line
+    // before its options, so it is never trimmed.
+    {
+      final firstOptionIdx =
+          block.indexWhere((l) => _optionRe.hasMatch(l.text));
+      final headEnd = firstOptionIdx == -1 ? block.length : firstOptionIdx;
+      var stemIdx = -1;
+      for (var i = 0; i < headEnd; i++) {
+        final t = _cleanStored(block[i].text);
+        final words = t
+            .split(RegExp(r'\s+'))
+            .where((w) => w.isNotEmpty)
+            .length;
+        // A title line can itself be long ("TEHSILDAR/ CONSOLIDATION
+        // OFFICER/ HILL TORRENT" is 5 words) — length alone does not
+        // make it a stem. A real stem is sentence-case (has a
+        // lowercase letter); a title line is all-caps. A numbered
+        // line is always a stem start, even when all-caps.
+        final allCaps = !RegExp(r'[a-z]').hasMatch(t) &&
+            RegExp(r'[A-Z]').hasMatch(t);
+        if (questionStart.hasMatch(t) ||
+            (!allCaps &&
+                (t.endsWith('?') || t.endsWith('؟') || words >= 4))) {
+          stemIdx = i;
+          break;
+        }
+      }
+      if (stemIdx > 0) {
+        var allFurniture = true;
+        for (var i = 0; i < stemIdx; i++) {
+          final t = _cleanStored(block[i].text);
+          final words = t
+              .split(RegExp(r'\s+'))
+              .where((w) => w.isNotEmpty)
+              .length;
+          final allCaps = !RegExp(r'[a-z]').hasMatch(t) &&
+              RegExp(r'[A-Z]').hasMatch(t);
+          // A numbered line is a question, never furniture.
+          if (questionStart.hasMatch(t) ||
+              (!allCaps && words > 3) ||
+              t.endsWith('?') ||
+              t.endsWith('؟')) {
+            allFurniture = false;
+            break;
+          }
+        }
+        if (allFurniture) block = block.sublist(stemIdx);
+      }
+    }
     final firstLine = block.first.text;
-    final paper = block.first.paper;
+    // The block's paper is the paper of its first OPTION line when it
+    // has one: a block that opens with front matter ("Papers of 2021
+    // 521", before the "MODEL PAPER 66" heading) carries the default
+    // paper on its first line, while its question belongs to the paper
+    // that follows. Using the first line's paper stranded Q1 under
+    // "Paper 1", where no key could ever join it. Blocks without
+    // options (q-only / flashcard) keep the first line's paper.
+    String? optionPaper;
+    for (final l in block) {
+      if (_optionRe.hasMatch(l.text)) {
+        optionPaper = l.paper;
+        break;
+      }
+    }
+    final paper = optionPaper ?? block.first.paper;
     // Bare-numbered questions ("52 Who founded …?") carry no dotted
     // number, so _questionNumber returns null for them — but the
     // question DID parse, and leaving its number unrecorded reports
@@ -2128,7 +2842,12 @@ ParseResult _parseImpl(
             ? int.tryParse(
                 RegExp(r'^\d+').firstMatch(cleanFirst)!.group(0)!,
               )
-            : null);
+            : null) ??
+        // Sequence recovery (PPSC-66): a number clipped at the page
+        // edge is recovered from its neighbours above. Never a guess
+        // — [recoveredNumbers] is null unless the run exactly filled
+        // its gap.
+        recoveredNumbers[b];
     final page = block.first.page;
     final part = structure?.partForLine(block.first.lineIndex) ?? '';
     // Multi-line question: first line + continuations, and the lines
@@ -2195,7 +2914,7 @@ ParseResult _parseImpl(
           excluded.add(
             '$label — answer unknown (the answer key says "?").',
           );
-          pending.add(
+          addPending(
             PendingQuestion(
               text: oneLiner.questionText,
               options: oneLiner.options,
@@ -2204,6 +2923,8 @@ ParseResult _parseImpl(
               page: page,
               part: part,
               reason: 'unknown-key',
+              number: number,
+              paper: paper,
             ),
           );
           skipped++;
@@ -2266,7 +2987,7 @@ ParseResult _parseImpl(
       if (oneLiner.options.length == 4 &&
           (oneLiner.questionText.trim().endsWith('?') ||
               oneLiner.questionText.trim().endsWith('؟'))) {
-        pending.add(
+        addPending(
           PendingQuestion(
             text: oneLiner.questionText,
             options: oneLiner.options,
@@ -2280,6 +3001,8 @@ ParseResult _parseImpl(
             page: page,
             part: part,
             reason: 'no-key-entry',
+            number: number,
+            paper: paper,
           ),
         );
       }
@@ -2347,7 +3070,7 @@ ParseResult _parseImpl(
           excluded.add(
             '$label — answer unknown (the answer key says "?").',
           );
-          pending.add(
+          addPending(
             PendingQuestion(
               text: standard.questionText,
               options: standard.options,
@@ -2356,6 +3079,8 @@ ParseResult _parseImpl(
               page: page,
               part: part,
               reason: 'unknown-key',
+              number: number,
+              paper: paper,
             ),
           );
           skipped++;
@@ -2425,7 +3150,7 @@ ParseResult _parseImpl(
       if (standard.options.length == 4 &&
           (standard.questionText.trim().endsWith('?') ||
               standard.questionText.trim().endsWith('؟'))) {
-        pending.add(
+        addPending(
           PendingQuestion(
             text: standard.questionText,
             options: standard.options,
@@ -2439,6 +3164,7 @@ ParseResult _parseImpl(
             page: page,
             part: part,
             reason: 'no-key-entry',
+            paper: paper,
           ),
         );
       }
@@ -2549,7 +3275,6 @@ ParseResult _parseImpl(
   // paper/month segment, and is consumed — Paper 2's key can never
   // answer Paper 1's questions. Candidates the key cannot answer are
   // skipped and listed, never guessed; the import still succeeds.
-  final questionsMissingAnswers = <String>[];
   final unanswered = <_AnswerlessCandidate>[];
   // Key tokens that existed for a candidate but matched none of its
   // options (kept for the "matches no option" error — the entry is
@@ -2570,7 +3295,7 @@ ParseResult _parseImpl(
       // needs exactly 4 options; normalising needs the answer) — they
       // stay excluded with their reason, never guessed.
       if (c.options.length == 4) {
-        pending.add(
+        addPending(
           PendingQuestion(
             text: c.text,
             options: c.options,
@@ -2579,13 +3304,15 @@ ParseResult _parseImpl(
             page: c.page,
             part: structure?.partForLine(c.lineIndex) ?? '',
             reason: 'unknown-key',
+            number: c.number,
+            paper: c.paper,
           ),
         );
       }
       skipped++;
       continue;
     }
-    final correct = token == null ? null : _resolveAnswer(token, c.options);
+    final correct = token == null ? null : resolveAnswerToken(token, c.options);
     if (token != null && correct == null) failedTokens[c] = token;
     if (correct != null) {
       // A tick / bold signal on this question that disagrees with the
@@ -2640,59 +3367,19 @@ ParseResult _parseImpl(
       bump(c.format);
       countSource('key');
       keyEntriesApplied++;
+      keyAppliedByPaper[c.paper] = (keyAppliedByPaper[c.paper] ?? 0) + 1;
       continue;
     }
     unanswered.add(c);
   }
 
-  // Fallback: a key entry that matched nothing in its own segment
-  // gets a second chance in ANOTHER segment — but only when that
-  // segment's own key has no entry for the number (so a paper's own
-  // key is never overridden). This is the mid-page-key case: a key
-  // printed at the top of a page belongs to the paper that ended on
-  // the previous page, and its entries join that paper's questions.
-  // Entries matching nothing anywhere are reported, never dropped.
+  // Strict paper rule (owner, 20 Nov 2026): there is NO cross-paper
+  // fallback — a key entry that matched nothing in its own segment is
+  // reported below, never applied to another paper's questions. (The
+  // mid-page-key case the old fallback served is already handled in
+  // [segmentLines]: a bare key heading belongs to the paper whose
+  // questions precede it.)
   final unmatchedKeyEntries = <String>[];
-  for (final paperEntry in segmented.keyEntries.entries) {
-    final keyPaper = paperEntry.key;
-    final entries = paperEntry.value;
-    for (final numberEntry in entries.entries.toList()) {
-      final number = numberEntry.key;
-      final token = numberEntry.value;
-      _AnswerlessCandidate? target;
-      for (final c in unanswered) {
-        if (c.number != number || c.paper == keyPaper) continue;
-        final ownKeys = segmented.keyEntries[c.paper];
-        if (ownKeys != null && ownKeys.containsKey(number)) continue;
-        target = c;
-        break;
-      }
-      if (target == null) continue;
-      final correct = _resolveAnswer(token, target.options);
-      if (correct == null) continue;
-      final t = target;
-      questions.add(
-        Question(
-          text: t.text,
-          options: t.options,
-          correctIndex: correct,
-          subject: t.subject,
-          sourceId: sourceId,
-          sourceLabel: sourceLabel,
-          explanation: t.explanation,
-          page: t.page,
-          part: structure?.partForLine(t.lineIndex) ?? '',
-          answerSource: 'key',
-          boldOptions: t.boldOptions,
-        ),
-      );
-      bump(t.format);
-      countSource('key');
-      keyEntriesApplied++;
-      unanswered.remove(t);
-      entries.remove(number);
-    }
-  }
   for (final paperEntry in segmented.keyEntries.entries) {
     for (final numberEntry in paperEntry.value.entries) {
       unmatchedKeyEntries.add(
@@ -2714,9 +3401,12 @@ ParseResult _parseImpl(
     skipped++;
     // Kept for AI inference (explicit user choice) — never guessed.
     // 5-option candidates cannot become pending questions (exactly 4
-    // options are required; normalising needs the answer).
+    // options are required; normalising needs the answer) — and so
+    // they have no missing-answers entry either (the report mirrors
+    // the pending list); they are still reported in [errors] below.
+    final token = failedTokens[c];
     if (c.options.length == 4) {
-      pending.add(
+      addPending(
         PendingQuestion(
           text: c.text,
           options: c.options,
@@ -2725,23 +3415,19 @@ ParseResult _parseImpl(
           page: c.page,
           part: structure?.partForLine(c.lineIndex) ?? '',
           reason: 'no-key-entry',
+          number: c.number,
+          paper: c.paper,
         ),
+        failedToken: token,
       );
     }
-    final token = failedTokens[c];
     if (token == null) {
-      questionsMissingAnswers.add(
-        '${c.paper} Q${c.number} — no key entry',
-      );
       errors.add(
         'Block ${c.blockIndex + 1}: ${c.paper} Q${c.number} has 4 '
         'options but no usable answer (no Answer line and no matching '
         'Answer Key entry).',
       );
     } else {
-      questionsMissingAnswers.add(
-        '${c.paper} Q${c.number} — key entry "$token" matches no option',
-      );
       errors.add(
         'Block ${c.blockIndex + 1}: ${c.paper} Q${c.number} key entry '
         '"$token" matches none of its 4 options.',
@@ -2803,26 +3489,39 @@ ParseResult _parseImpl(
   }
 
   // --- Test-building parts (exact parsed counts). ---
-  // Only parts with at least one parsed question; a part with 0
-  // questions is not a part for test building. When the book has no
-  // questions at all, a single "Poori book" part (so the import still
-  // reports 0 MCQs with a sensible parts list — a letter is never
-  // misdetected as a question paper).
+  // A part appears when it has at least one parsed question OR at
+  // least one answer-pending question (PPSC-66 §5.5, 20 Nov 2026: a
+  // part with only pending questions — Paper 67's General Knowledge,
+  // 10 pending, 0 parsed — used to vanish from this list even though
+  // its questions exist). [questionCount] stays the parsed count
+  // (testable questions); [pendingCount] carries the pending ones.
+  // When the book has no questions at all, a single "Poori book" part
+  // (so the import still reports 0 MCQs with a sensible parts list —
+  // a letter is never misdetected as a question paper).
   final parts = <BookPart>[];
-  if (structure != null && questions.isNotEmpty) {
+  if (structure != null &&
+      (questions.isNotEmpty || pending.isNotEmpty)) {
     final byPart = <String, List<Question>>{};
     for (final q in questions) {
       byPart.putIfAbsent(q.part, () => <Question>[]).add(q);
     }
+    final pendingByPart = <String, List<PendingQuestion>>{};
+    for (final p in pending) {
+      pendingByPart.putIfAbsent(p.part, () => <PendingQuestion>[]).add(p);
+    }
     for (final sp in structure.parts) {
-      final qs = byPart[sp.title];
-      if (qs == null || qs.isEmpty) continue;
+      final qs = byPart[sp.title] ?? const <Question>[];
+      final ps = pendingByPart[sp.title] ?? const <PendingQuestion>[];
+      if (qs.isEmpty && ps.isEmpty) continue;
       // Page range = the span of this part's questions' pages, not
       // the heading span: a heading can sit mid-page, so the heading
       // span alone is wrong (F1: "Pakistan Current Affairs" Q8–10
       // are on page 2, after the "International" heading — the part
       // is pages 1–2, not 1–1).
-      final pages = [for (final q in qs) q.page].where((p) => p > 0);
+      final pages = [
+        for (final q in qs) q.page,
+        for (final p in ps) p.page,
+      ].where((p) => p > 0);
       final start = pages.isEmpty
           ? sp.startPage
           : pages.reduce((a, b) => a < b ? a : b);
@@ -2832,6 +3531,7 @@ ParseResult _parseImpl(
       parts.add(
         sp.copyWith(
           questionCount: qs.length,
+          pendingCount: ps.length,
           startPage: start,
           endPage: end,
         ),
@@ -2840,8 +3540,15 @@ ParseResult _parseImpl(
     // A question whose part is '' (before the first heading) belongs
     // to the first part — extend its range to cover those pages too.
     final unparted = byPart[''];
-    if (unparted != null && unparted.isNotEmpty && parts.isNotEmpty) {
-      final pages = [for (final q in unparted) q.page].where((p) => p > 0);
+    final unpartedPending = pendingByPart[''];
+    if (parts.isNotEmpty &&
+        ((unparted != null && unparted.isNotEmpty) ||
+            (unpartedPending != null && unpartedPending.isNotEmpty))) {
+      final pages = [
+        for (final q in unparted ?? const <Question>[]) q.page,
+        for (final p in unpartedPending ?? const <PendingQuestion>[])
+          p.page,
+      ].where((p) => p > 0);
       final start = pages.isEmpty
           ? parts[0].startPage
           : [parts[0].startPage, ...pages].reduce((a, b) => a < b ? a : b);
@@ -2849,7 +3556,10 @@ ParseResult _parseImpl(
           ? parts[0].endPage
           : [parts[0].endPage, ...pages].reduce((a, b) => a > b ? a : b);
       parts[0] = parts[0].copyWith(
-        questionCount: parts[0].questionCount + unparted.length,
+        questionCount:
+            parts[0].questionCount + (unparted?.length ?? 0),
+        pendingCount:
+            parts[0].pendingCount + (unpartedPending?.length ?? 0),
         startPage: start,
         endPage: end,
       );
@@ -2865,6 +3575,7 @@ ParseResult _parseImpl(
         startPage: 1,
         endPage: totalPages,
         questionCount: questions.length,
+        pendingCount: pending.length,
       ),
     );
   }
@@ -2915,6 +3626,47 @@ ParseResult _parseImpl(
     }
   }
 
+  // Key-paper report for the preview (strict paper rule, owner
+  // 20 Nov 2026): which paper each applied key belonged to, and any
+  // key whose named paper has no questions in this import (applied
+  // to nothing, reported plainly — never silently to another paper).
+  final keyPaperReport = <String>[];
+  for (final e in keyAppliedByPaper.entries) {
+    keyPaperReport.add("Key '${e.key}' se ${e.value} jawab lage.");
+  }
+  // HIGH CONFIDENCE keys were applied, but they are NOT verified —
+  // the preview must show the flag so the user confirms them before
+  // saving (Part 8: the preview + Save is the confirmation path).
+  // Only keys that actually applied get the flag.
+  for (final e in keyDecisions.entries) {
+    if (e.value.confidence == KeyMatchConfidence.highConfidence &&
+        keyAppliedByPaper.containsKey(e.key)) {
+      keyPaperReport.add(
+        "Key '${e.key}' HIGH CONFIDENCE se lagi — ${e.value.reason} "
+        'Save karne se pehle tasdeeq karein.',
+      );
+    }
+  }
+  // Withheld keys (NEEDS REVIEW / UNVERIFIED / MISMATCH): never
+  // applied — the decision reason is the report, so the user knows
+  // exactly why the key did not answer anything.
+  for (final e in withheldKeyDecisions.entries) {
+    keyPaperReport.add(
+      "Key '${e.key}' nahi lagayi — ${e.value.reason}",
+    );
+  }
+  final papersWithQuestions = {
+    for (final l in segmented.questionLines) l.paper,
+  };
+  for (final paper in segmented.explicitKeyPapers) {
+    if (!papersWithQuestions.contains(paper)) {
+      keyPaperReport.add(
+        "Key '$paper' mili, lekin is PDF mein $paper ke sawal nahi — "
+        'key nahi lagayi.',
+      );
+    }
+  }
+
   return ParseResult(
     questions: questions,
     parsed: questions.length,
@@ -2939,6 +3691,7 @@ ParseResult _parseImpl(
     noiseLinesFiltered: noiseLinesFiltered,
     facts: facts,
     answerPending: pending,
+    keyPaperReport: keyPaperReport,
   );
 }
 
@@ -3205,7 +3958,8 @@ bool _isAnswerContinuation(SegmentedLine next, int answerPage) {
   final firstPage = first.page;
   var restStart = 1;
   var continuations = 0;
-  var prevEndsQuestion = qBuf.toString().endsWith('?');
+  var prevEndsQuestion = qBuf.toString().endsWith('?') ||
+      qBuf.toString().endsWith('؟');
   // The page the continuation is currently being read from. Starts
   // on the question's own page; moves forward one page at a time
   // when the stem crosses a page break.
@@ -3246,10 +4000,18 @@ bool _isAnswerContinuation(SegmentedLine next, int answerPage) {
         _hasInlineOptionMarkers(line)) {
       break;
     }
+    // The '?' test must use the CLEANED line: the raw line can carry
+    // a trailing bold marker (U+E000) after the '?', so the raw line
+    // ends with the marker, not '?', and the loop would swallow the
+    // next line (junk, or the next question's stem) into this one.
+    // (F2: "Mcqsplanet.com" was appended to every two-line '?' stem,
+    // so the pending gate failed and 10 real questions were lost.)
+    final cleanLine = _cleanStored(line.trim());
     qBuf.write(' ');
-    qBuf.write(_cleanStored(line.trim()));
+    qBuf.write(cleanLine);
     continuations++;
-    prevEndsQuestion = line.trim().endsWith('?');
+    prevEndsQuestion =
+        cleanLine.endsWith('?') || cleanLine.endsWith('؟');
     restStart = i + 1;
   }
   return (
@@ -3340,7 +4102,7 @@ _resolveSignals({
   ];
   final explicit = answerToken == null
       ? null
-      : _resolveAnswer(answerToken, options);
+      : resolveAnswerToken(answerToken, options);
   if (explicit != null) {
     if (tickIndex != null && tickIndex != explicit) {
       conflicts.add(
@@ -4021,64 +4783,6 @@ final _explanationRe = RegExp(
 );
 final _subjectRe = RegExp(r'^Subject\s*[:\-]\s*(.+)$', caseSensitive: false);
 
-/// Resolves an answer token to an option index: a letter (C), a number
-/// (3), the option's own text ("Islamabad"), or a letter plus the text
-/// ("B) Asif Ali Zardari" — the letter wins, the text is the fallback).
-/// A letter in parens ("(C) 80", "(C)80" — the OCR-noisy Final Answer
-/// form, no space after the paren) resolves by letter; the trailing
-/// value is a cross-check for the caller (see
-/// [_finalAnswerValueConflict]), not a second resolution path.
-int? _resolveAnswer(String token, List<String> options) {
-  final t = token.trim();
-  // "Option C" (Examveda "Answer: Option X"): the word "Option" + a
-  // letter. Resolve by the letter. A–E (not just A–D): a 5-option
-  // question's answer can be E — the single-letter bounds check
-  // below rejects E for a 4-option question.
-  final optionLetter = RegExp(
-    r'^option\s+([A-Ea-e1-5])\b',
-    caseSensitive: false,
-  ).firstMatch(t);
-  if (optionLetter != null) {
-    return _resolveAnswer(optionLetter.group(1)!, options);
-  }
-  // "(C) 80" / "(C)80": letter in parens, then an optional value.
-  // The paren makes it unambiguous (not a decimal like "3.14"), so
-  // the space after the paren is optional — OCR drops it.
-  final parenLetter = RegExp(
-    r'^[\(\[]\s*([A-Ea-e1-5])\s*[\)\]]\s*(.*)$',
-  ).firstMatch(t);
-  if (parenLetter != null) {
-    final byLetter = _resolveAnswer(parenLetter.group(1)!, options);
-    if (byLetter != null) return byLetter;
-    final rest = parenLetter.group(2)!;
-    if (rest.isNotEmpty) return _resolveAnswer(rest, options);
-    return null;
-  }
-  final stripped = t.replaceAll(RegExp(r'^[\(\[]|[\)\]]$'), '');
-  // "B) Asif Ali Zardari" / "2. Paris": letter-or-number, then text.
-  // A–E: a 5-option question's answer can be E.
-  final letterText = RegExp(
-    r'^\(?([A-Ea-e1-5])[\)\.\:\-]\s+(.+)$',
-  ).firstMatch(stripped);
-  if (letterText != null) {
-    final byLetter = _resolveAnswer(letterText.group(1)!, options);
-    if (byLetter != null) return byLetter;
-    return _resolveAnswer(letterText.group(2)!, options);
-  }
-  final asNum = int.tryParse(stripped);
-  if (asNum != null && asNum >= 1 && asNum <= options.length) {
-    return asNum - 1;
-  }
-  if (stripped.length == 1) {
-    final c = stripped.toUpperCase().codeUnitAt(0);
-    if (c >= 65 && c < 65 + options.length) return c - 65;
-  }
-  final lower = stripped.toLowerCase();
-  for (var i = 0; i < options.length; i++) {
-    if (options[i].trim().toLowerCase() == lower) return i;
-  }
-  return null;
-}
 
 /// Cross-check for a "Final Answer: (X) `<value>`" token: the trailing
 /// value (e.g. "80") should be the letter's option text. Returns a

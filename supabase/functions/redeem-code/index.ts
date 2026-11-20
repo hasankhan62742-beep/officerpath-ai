@@ -21,7 +21,14 @@
 //
 // ERROR STRINGS (the app maps these to Roman Urdu messages):
 //   unauthorized | invalid_code | code_not_found | code_already_used
-//   code_expired | code_not_yours
+//   code_expired | code_not_yours | rate_limited
+//
+// RATE LIMIT (L2): at most REDEEM_ATTEMPTS_PER_HOUR redeem attempts
+// per caller per hour, logged in public.redeem_attempts (migration
+// 011). Exceeding it returns 429 rate_limited. The throttle is
+// FAIL-OPEN: if logging/counting errors (e.g. the table is not
+// applied yet), the error is logged and the redeem proceeds — a
+// throttle failure must never block a legitimate redeem.
 // ============================================================
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -34,6 +41,8 @@ const corsHeaders = {
 
 const CODE_RE = /^OP([123])-([A-Z2-9]{6})$/;
 const MONTHS: Record<string, number> = { "1": 1, "2": 2, "3": 12 };
+const REDEEM_ATTEMPTS_PER_HOUR = 10;
+const REDEEM_ATTEMPT_WINDOW_MS = 60 * 60 * 1000;
 
 async function sha256Hex(input: string): Promise<string> {
   const data = await crypto.subtle.digest(
@@ -79,6 +88,34 @@ Deno.serve(async (req: Request) => {
     return json({ ok: false, error: "unauthorized" }, 401);
   }
 
+  // 1b. Per-user attempt throttle (L2): at most
+  // REDEEM_ATTEMPTS_PER_HOUR attempts per rolling hour. Every
+  // attempt is logged first, then counted — so brute-force guessing
+  // of codes is capped at 10/hour per account. FAIL-OPEN: any error
+  // in the throttle itself is logged and the redeem proceeds, so a
+  // throttle failure (e.g. migration 011 not applied yet) can never
+  // block a legitimate redeem.
+  const admin = createClient(supabaseUrl, serviceKey);
+  try {
+    const windowStart = new Date(Date.now() - REDEEM_ATTEMPT_WINDOW_MS)
+      .toISOString();
+    const { error: logError } = await admin
+      .from("redeem_attempts")
+      .insert({ user_id: user.id });
+    if (logError) throw logError;
+    const { count, error: countError } = await admin
+      .from("redeem_attempts")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", user.id)
+      .gte("attempted_at", windowStart);
+    if (countError) throw countError;
+    if ((count ?? 0) > REDEEM_ATTEMPTS_PER_HOUR) {
+      return json({ ok: false, error: "rate_limited" }, 429);
+    }
+  } catch (e) {
+    console.error("redeem-code throttle check failed (fail-open):", e);
+  }
+
   // 2. Validate + hash the code.
   let body: { code?: unknown };
   try {
@@ -96,9 +133,9 @@ Deno.serve(async (req: Request) => {
   const months = MONTHS[match[1]];
   const codeHash = await sha256Hex(rawCode);
 
-  // 3. Look the code up by hash. The service-role client bypasses RLS;
-  // activation_codes has NO client policies, so this is the only way in.
-  const admin = createClient(supabaseUrl, serviceKey);
+  // 3. Look the code up by hash. The service-role client (created
+  // above, step 1b) bypasses RLS; activation_codes has NO client
+  // policies, so this is the only way in.
   const { data: codeRow, error: lookupError } = await admin
     .from("activation_codes")
     .select("id, plan, months, user_id, expires_at, used_at")
@@ -135,7 +172,14 @@ Deno.serve(async (req: Request) => {
   premiumUntil.setMonth(premiumUntil.getMonth() + (codeRow.months ?? months));
 
   // 5. Mark the code used (single-use) and grant Premium.
-  const { error: useError } = await admin
+  // M1 fix: the claim must affect exactly one row. A PostgREST
+  // UPDATE matching zero rows returns success with an empty array
+  // and NO error, so checking only the error let two simultaneous
+  // redeems of one code both succeed. Appending .select() and
+  // requiring exactly one returned row makes the loser fail with
+  // code_already_used: the .is("used_at", null) predicate means only
+  // the first claim matches a row.
+  const { data: claimed, error: useError } = await admin
     .from("activation_codes")
     .update({
       user_id: user.id,
@@ -143,9 +187,11 @@ Deno.serve(async (req: Request) => {
       used_by: user.id,
     })
     .eq("id", codeRow.id)
-    .is("used_at", null);
-  if (useError) {
-    // Another request redeemed it a moment ago.
+    .is("used_at", null)
+    .select("id");
+  if (useError || !claimed || claimed.length !== 1) {
+    // Either the update errored, or another request redeemed it a
+    // moment ago (zero rows matched) — either way the code is gone.
     return json({ ok: false, error: "code_already_used" }, 409);
   }
   const { error: profileError } = await admin

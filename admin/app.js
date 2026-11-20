@@ -27,6 +27,46 @@
   var usersCache = []; // Last loaded profiles, for search + detail.
   var testCountByUser = {}; // user_id -> tests taken.
   var currentDetailUserId = null;
+  // transaction_id -> true for TIDs already spent on an APPROVED
+  // payment (refreshed by loadPayments). The panel refuses approval
+  // on those client-side; the issue-code function is the authority
+  // and rejects them server-side too.
+  var approvedTids = {};
+  // Live payment-alert channel (Realtime). One subscription per login.
+  var paymentChannel = null;
+  // Web Audio context for the alert beep (created on first user
+  // interaction — browsers block audio before any gesture).
+  var alertAudioCtx = null;
+
+  // Server error codes from issue-code, in the admin's words.
+  var ISSUE_CODE_ERRORS = {
+    tid_already_used: 'This transaction ID was already used on an approved payment.',
+    payment_not_pending: 'This payment is no longer pending — it may already have been handled.',
+    payment_not_found: 'This payment no longer exists.',
+    payment_user_mismatch: 'This payment does not belong to that user.',
+    payment_already_handled: 'This payment was already handled — no second code was issued.',
+  };
+
+  // Reads the Edge Function's JSON error body out of a
+  // FunctionsHttpError: supabase-js puts the raw Response on
+  // error.context and leaves the body unconsumed, so .json() works.
+  // Falls back to the generic message when the body cannot be read.
+  // Returns a Promise<string> already translated to admin wording.
+  function serverErrorMessage(err) {
+    var ctx = err && err.context;
+    function translate(code) {
+      return ISSUE_CODE_ERRORS[code] || code || err.message || 'Unknown error';
+    }
+    if (ctx && typeof ctx.json === 'function') {
+      return ctx.json().then(function (body) {
+        return translate(body && body.error);
+      }).catch(function () {
+        return err.message || 'Unknown error';
+      });
+    }
+    if (ctx && ctx.error) return Promise.resolve(translate(ctx.error));
+    return Promise.resolve(translate(err && err.message));
+  }
 
   function $(id) { return document.getElementById(id); }
 
@@ -101,6 +141,18 @@
       hide('approve-modal');
       loadAll();
     });
+    $('payment-alert-close').addEventListener('click', function () {
+      hide('payment-alert-banner');
+    });
+    // Audio may only start after a user gesture: unlock (or resume)
+    // the alert context on every tap/click.
+    document.addEventListener('pointerdown', ensureAudio);
+
+    // PWA: cache the panel shell so it opens when the connection
+    // drops. Failure here is non-fatal — the panel still works online.
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(function () {});
+    }
 
     // Restore an existing session (already signed in?).
     client.auth.getSession().then(function (res) {
@@ -200,6 +252,83 @@
     loadCodes();
     loadPushHistory();
     loadWaitlist();
+    subscribePaymentAlerts();
+  }
+
+  /* ---------------- live payment alerts (Realtime + sound) -------- */
+
+  // Creates (or resumes) the Web Audio context. Browsers block audio
+  // until a user gesture, so this is called on pointerdown and again
+  // right before a beep. Never throws — sound is best-effort.
+  function ensureAudio() {
+    try {
+      if (!alertAudioCtx) {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) alertAudioCtx = new AC();
+      }
+      if (alertAudioCtx && alertAudioCtx.state === 'suspended') {
+        alertAudioCtx.resume();
+      }
+    } catch (e) { /* audio unavailable — the banner still shows */ }
+  }
+
+  // Short attention beep: three sine notes (A5, A5, D6), no audio
+  // asset needed. Sound only works while the panel is open — a
+  // closed web page cannot beep; the payment-alert email covers that.
+  function playAlertSound() {
+    try {
+      ensureAudio();
+      if (!alertAudioCtx) return;
+      var t = alertAudioCtx.currentTime;
+      [0, 0.25, 0.5].forEach(function (offset, i) {
+        var osc = alertAudioCtx.createOscillator();
+        var gain = alertAudioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = i === 2 ? 1174.66 : 880;
+        gain.gain.setValueAtTime(0.0001, t + offset);
+        gain.gain.exponentialRampToValueAtTime(0.2, t + offset + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + offset + 0.22);
+        osc.connect(gain);
+        gain.connect(alertAudioCtx.destination);
+        osc.start(t + offset);
+        osc.stop(t + offset + 0.25);
+      });
+    } catch (e) { /* sound is best-effort */ }
+  }
+
+  // Shows the gold banner for a new pending payment and beeps.
+  function showPaymentAlert(p) {
+    $('payment-alert-text').textContent =
+      'New payment — ' + (p.email || '—') + ' — ' + planLabel(p.plan) +
+      ' — TID ' + (p.transaction_id || '—');
+    show('payment-alert-banner');
+    playAlertSound();
+  }
+
+  // Subscribes once per login to INSERTs on public.payments
+  // (status pending). Needs migration 014 (payments in the
+  // supabase_realtime publication) applied live; until then the
+  // subscription stays silent and nothing else breaks.
+  function subscribePaymentAlerts() {
+    if (!client || paymentChannel) return;
+    paymentChannel = client
+      .channel('officerpath-payments')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'payments',
+          filter: 'status=eq.pending',
+        },
+        function (payload) {
+          var p = (payload && payload.new) || {};
+          showPaymentAlert(p);
+          loadPayments();
+          loadStats();
+        },
+      )
+      .subscribe();
   }
 
   function countQuery(table, filter) {
@@ -408,36 +537,24 @@
 
   function loadPayments() {
     client.from('payments')
-      .select('id, user_id, email, plan, method, transaction_id, status, created_at')
+      .select('id, user_id, email, plan, method, transaction_id, status, created_at, screenshot_path')
       .eq('status', 'pending')
       .order('created_at', { ascending: false })
       .limit(100)
       .then(function (res) {
         if (res.error) throw res.error;
         var rows = res.data || [];
-        var tbody = $('payments-tbody');
-        tbody.innerHTML = '';
-        $('payments-empty').classList.toggle('hidden', rows.length !== 0);
-        rows.forEach(function (p) {
-          var tr = document.createElement('tr');
-          tr.innerHTML =
-            '<td>' + esc(p.email || '—') + '</td>' +
-            '<td>' + esc(planLabel(p.plan)) + '</td>' +
-            '<td>' + esc(p.method) + '</td>' +
-            '<td>' + esc(p.transaction_id) + '</td>' +
-            '<td>' + fmtDate(p.created_at) + '</td>' +
-            '<td></td>';
-          var approveBtn = document.createElement('button');
-          approveBtn.textContent = 'Approve';
-          approveBtn.addEventListener('click', function () { approvePayment(p); });
-          var rejectBtn = document.createElement('button');
-          rejectBtn.textContent = 'Reject';
-          rejectBtn.style.marginLeft = '8px';
-          rejectBtn.addEventListener('click', function () { rejectPayment(p); });
-          tr.lastChild.appendChild(approveBtn);
-          tr.lastChild.appendChild(rejectBtn);
-          tbody.appendChild(tr);
-        });
+        // Second query: every payment's TID + status, so the queue can
+        // flag a TID that was already used on another row (pending or
+        // approved). Admins can read all payments (RLS), so this works.
+        return client.from('payments')
+          .select('transaction_id, status')
+          .order('created_at', { ascending: false })
+          .limit(1000)
+          .then(function (allRes) {
+            if (allRes.error) throw allRes.error;
+            renderPayments(rows, allRes.data || []);
+          });
       })
       .catch(function (e) {
         $('payments-tbody').innerHTML =
@@ -445,45 +562,128 @@
       });
   }
 
-  // Approve: issue the code (Edge Function emails it), show it ONCE,
-  // then mark the payment approved and link the code row.
+  function renderPayments(rows, allPayments) {
+    // Counts per TID across ALL payments (not just pending).
+    var tidCount = {};
+    approvedTids = {};
+    allPayments.forEach(function (p) {
+      var tid = p.transaction_id;
+      tidCount[tid] = (tidCount[tid] || 0) + 1;
+      if (p.status === 'approved') approvedTids[tid] = true;
+    });
+    var tbody = $('payments-tbody');
+    tbody.innerHTML = '';
+    $('payments-empty').classList.toggle('hidden', rows.length !== 0);
+    rows.forEach(function (p) {
+      var tr = document.createElement('tr');
+      var tidHtml = esc(p.transaction_id);
+      var alreadyApproved = !!approvedTids[p.transaction_id];
+      var duplicate = (tidCount[p.transaction_id] || 0) > 1;
+      if (alreadyApproved) {
+        tidHtml += ' <span style="color:#b91c1c;font-weight:700">\u26A0 TID ALREADY APPROVED</span>';
+      } else if (duplicate) {
+        tidHtml += ' <span style="color:#b91c1c;font-weight:700">\u26A0 DUPLICATE TID</span>';
+      }
+      tr.innerHTML =
+        '<td>' + esc(p.email || '—') + '</td>' +
+        '<td>' + esc(planLabel(p.plan)) + '</td>' +
+        '<td>' + esc(p.method) + '</td>' +
+        '<td>' + tidHtml + '</td>' +
+        '<td>' + fmtDate(p.created_at) + '</td>' +
+        '<td></td>';
+      var approveBtn = document.createElement('button');
+      approveBtn.textContent = 'Approve';
+      if (alreadyApproved) {
+        // Refuse approval in the UI too — the function rejects it
+        // server-side as well, so a stale list cannot slip through.
+        approveBtn.disabled = true;
+        approveBtn.title = 'This transaction ID was already used on an approved payment.';
+      } else {
+        approveBtn.addEventListener('click', function () { approvePayment(p); });
+      }
+      var rejectBtn = document.createElement('button');
+      rejectBtn.textContent = 'Reject';
+      rejectBtn.style.marginLeft = '8px';
+      rejectBtn.addEventListener('click', function () { rejectPayment(p); });
+      tr.lastChild.appendChild(approveBtn);
+      tr.lastChild.appendChild(rejectBtn);
+      // Receipt screenshot (in-app upload) — signed URL, 1 hour.
+      // The same receipt also arrives on WhatsApp; either channel
+      // must be checked (TID + amount + receiver) before approving.
+      if (p.screenshot_path) {
+        var receiptBtn = document.createElement('button');
+        receiptBtn.textContent = 'Receipt';
+        receiptBtn.style.marginLeft = '8px';
+        receiptBtn.addEventListener('click', function () {
+          openReceipt(p.screenshot_path);
+        });
+        tr.lastChild.appendChild(receiptBtn);
+      }
+      tbody.appendChild(tr);
+    });
+  }
+
+  // Opens a receipt screenshot via a 1-hour signed URL (the bucket is
+  // private — no public link exists). Fails closed with a toast.
+  function openReceipt(path) {
+    client.storage.from('payment-proofs').createSignedUrl(path, 3600)
+      .then(function (res) {
+        if (res.error) throw res.error;
+        window.open(res.data.signedUrl, '_blank');
+      })
+      .catch(function (e) {
+        toast('Could not open receipt: ' + e.message);
+      });
+  }
+
+  // Approve: the issue-code function checks the payment + TID and
+  // marks the payment approved itself. The panel only passes
+  // payment_id, shows the returned code ONCE, and refreshes. If the
+  // function reports an error, NOTHING was marked — the admin sees
+  // the reason and the queue reloads.
   function approvePayment(payment) {
+    // Client-side refusal as well, in case the list is stale.
+    if (approvedTids[payment.transaction_id]) {
+      toast('This transaction ID was already used on an approved payment — approval refused.');
+      loadPayments();
+      return;
+    }
     if (!window.confirm('Approve this payment and issue a code?\n\n' +
         (payment.email || '') + ' — ' + planLabel(payment.plan) + ' — ' +
-        payment.method + ' ' + payment.transaction_id)) {
+        payment.method + ' ' + payment.transaction_id + '\n\n' +
+        'Have you checked the receipt (Receipt link on this row and/or ' +
+        'WhatsApp screenshot — TID + amount + receiver number)?')) {
       return;
     }
     client.functions.invoke('issue-code', {
-      body: { user_id: payment.user_id, email: payment.email, plan: payment.plan },
+      body: {
+        user_id: payment.user_id,
+        email: payment.email,
+        plan: payment.plan,
+        payment_id: payment.id,
+      },
     }).then(function (res) {
+      if (res.error) {
+        return serverErrorMessage(res.error).then(function (msg) {
+          throw new Error(msg);
+        });
+      }
       var data = res.data || {};
       if (!data.ok || !data.code) {
-        throw new Error(data.error || 'The issue-code function did not return a code.');
+        throw new Error(
+          ISSUE_CODE_ERRORS[data.error] ||
+          data.error ||
+          'The issue-code function did not return a code.',
+        );
       }
       showApproveModal(payment, data.code);
-      // Link the payment to the code row the function just created:
-      // the newest unused code for this buyer. If the lookup fails,
-      // the payment is still marked approved without code_id.
-      return client.from('activation_codes')
-        .select('id').eq('user_id', payment.user_id).is('used_at', null)
-        .order('issued_at', { ascending: false }).limit(1).maybeSingle()
-        .then(function (codeRes) {
-          var patch = {
-            status: 'approved',
-            reviewed_by: adminUser ? adminUser.id : null,
-            reviewed_at: new Date().toISOString(),
-          };
-          if (codeRes.data && codeRes.data.id) patch.code_id = codeRes.data.id;
-          return client.from('payments').update(patch).eq('id', payment.id);
-        });
-    }).then(function (res) {
-      if (res && res.error) throw res.error;
       toast('Payment approved — code issued.');
       loadStats();
       loadPayments();
       loadCodes();
     }).catch(function (e) {
       toast('Could not approve payment: ' + e.message);
+      loadPayments();
     });
   }
 

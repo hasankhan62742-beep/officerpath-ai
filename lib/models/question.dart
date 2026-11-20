@@ -10,6 +10,13 @@ import 'exam.dart';
 /// never guessed. [reason] says why it is pending: 'no-key-entry'
 /// (no key entry at all) or 'unknown-key' (the key explicitly
 /// says "?").
+/// [number] is the question's number IN THE BOOK (null when the book
+/// prints no number for it — a key can never match it by number, so
+/// it stays pending for manual correction) and [paper] is the paper
+/// segment it belongs to ("Paper 60", "January 2026", or "Paper 1"
+/// when the book has no headings). Both are set by the parser so a
+/// separately attached answer key can be matched by (paper, number)
+/// — never by position (20 Nov 2026).
 class PendingQuestion {
   const PendingQuestion({
     required this.text,
@@ -19,6 +26,8 @@ class PendingQuestion {
     this.page = 0,
     this.part = '',
     this.reason = 'no-key-entry',
+    this.number,
+    this.paper = '',
   }) : assert(options.length == 4, 'Pending questions need exactly 4 options');
 
   final String text;
@@ -28,6 +37,12 @@ class PendingQuestion {
   final int page;
   final String part;
   final String reason;
+
+  /// The book's number for this question (null = unnumbered).
+  final int? number;
+
+  /// The paper segment label ("Paper 60", "January 2026", "Paper 1").
+  final String paper;
 
   /// A pending question has no answer yet, so it is unverified by
   /// definition — the v2 preview shows it as awaiting manual
@@ -45,6 +60,8 @@ class PendingQuestion {
     'page': page,
     'part': part,
     'reason': reason,
+    'number': number,
+    'paper': paper,
   };
 
   factory PendingQuestion.fromMap(Map<String, dynamic> m) =>
@@ -61,10 +78,17 @@ class PendingQuestion {
         page: m['page'] as int? ?? 0,
         part: m['part'] as String? ?? '',
         reason: m['reason'] as String? ?? 'no-key-entry',
+        number: m['number'] as int?,
+        paper: m['paper'] as String? ?? '',
       );
 }
 
-/// One MCQ. [options] always has 4 entries; [correctIndex] is 0-3.
+/// One MCQ. [options] always has 4 entries; [correctIndex] is 0-3
+/// when the answer is known, or -1 when the book gave NO answer
+/// (no bold, no star, no ABCD key, no tick — see the "no-answers"
+/// notice, 20 Nov 2026). A question with no answer is never guessed:
+/// it can be saved and practised, but it is never scored and its
+/// "correct" option is never shown anywhere.
 class Question {
   Question({
     this.id,
@@ -90,7 +114,14 @@ class Question {
              verified: answerVerified ?? isVerifiedSource(answerSource),
            ),
        assert(options.length == 4, 'MCQs need exactly 4 options'),
-       assert(correctIndex >= 0 && correctIndex < 4);
+       assert(
+         correctIndex == -1 ||
+             (correctIndex >= 0 && correctIndex < 4),
+         'correctIndex is 0-3, or -1 for "no answer"',
+       );
+
+  /// True when the book (or the user) supplied an answer.
+  bool get hasAnswer => correctIndex != -1;
 
   final int? id;
   final String text;
@@ -148,19 +179,24 @@ class Question {
   final bool answerVerified;
 
   /// True when [source] is a printed/official answer signal.
+  // PPSC-66 (20 Nov 2026): 'flashcard' is NOT a verified source. A
+  // q-only question's options are GENERATED from the answer pool —
+  // the book printed no A–D mark on them — so presenting one as
+  // verified would certify an answer the book never marked. The
+  // book's short answer is real, but the question itself is a
+  // reconstruction; it must surface as unverified for review.
   static bool isVerifiedSource(String source) => const {
     'answer-line',
     'key',
     'tick',
     'bold',
     'asterisk',
-    'flashcard',
   }.contains(source);
 
   /// Confidence score (0–1) for the detected answer — the v2 preview
   /// shows it per question. Deterministic, from the answer source:
   /// an explicit answer line or the book's key is 1.0; a printed
-  /// tick / bold / asterisk / flashcard is 0.9 (a strong printed
+  /// tick / bold / asterisk is 0.9 (a strong printed
   /// signal, but a tick on a scanned page could be the student's pen
   /// — see [markProvenance]); an AI-inferred answer is 0.5; unknown
   /// is 0.0. An unverified answer (conflicting signals, or an
@@ -185,14 +221,18 @@ class Question {
   /// from OCR with unknown provenance.
   final double confidence;
 
-  /// Verification status for the v2 preview: 'verified' (the answer
-  /// comes from the book's own printed/official signal), 'unverified'
-  /// (AI-inferred, conflicting signals, or an OCR-sourced tick/bold
-  /// that could be the student's pen), or 'manually-corrected' (the
-  /// user set the answer by hand — see [originalCorrectIndex]).
-  String get verificationStatus => originalCorrectIndex != null
-      ? 'manually-corrected'
-      : (answerVerified ? 'verified' : 'unverified');
+  /// Verification status for the v2 preview: 'no-answer' (the book
+  /// gave no answer at all — never scored, never shown as correct),
+  /// 'verified' (the answer comes from the book's own printed/official
+  /// signal), 'unverified' (AI-inferred, conflicting signals, or an
+  /// OCR-sourced tick/bold that could be the student's pen), or
+  /// 'manually-corrected' (the user set the answer by hand — see
+  /// [originalCorrectIndex]).
+  String get verificationStatus => !hasAnswer
+      ? 'no-answer'
+      : originalCorrectIndex != null
+          ? 'manually-corrected'
+          : (answerVerified ? 'verified' : 'unverified');
 
   /// Where the answer mark came from: 'printed' (the book's own
   /// typesetting / text layer — a tick/bold here is official),
@@ -214,10 +254,13 @@ class Question {
   /// [newCorrectIndex]: the original extracted answer is kept in
   /// [originalCorrectIndex] (unless one is already kept), the answer
   /// source becomes 'manual' and the answer is verified (the user
-  /// confirmed it). Used by the v2 manual-correction UI.
+  /// confirmed it). Used by the v2 manual-correction UI. Correcting
+  /// an answerless question keeps NO original — there was no answer
+  /// to keep, so [originalCorrectIndex] stays null.
   Question withCorrection(int newCorrectIndex) => copyWith(
     correctIndex: newCorrectIndex,
-    originalCorrectIndex: originalCorrectIndex ?? correctIndex,
+    originalCorrectIndex:
+        originalCorrectIndex ?? (hasAnswer ? correctIndex : null),
     answerSource: 'manual',
     answerVerified: true,
     confidence: 1.0,
@@ -231,7 +274,11 @@ class Question {
   /// [options] by [copyWithShuffledOptions] so the flags stay aligned.
   final List<bool> boldOptions;
 
-  String get correctLetter => String.fromCharCode(65 + correctIndex);
+  /// 'A'..'D' for the correct option; '' when the question has no
+  /// answer (never '@' — 65 + -1). Call sites must check [hasAnswer]
+  /// before showing a "correct answer" anywhere.
+  String get correctLetter =>
+      hasAnswer ? String.fromCharCode(65 + correctIndex) : '';
 
   /// Returns a copy with the given fields replaced (all optional).
   /// Used by the parser to append "(Note: …)" evidence to a
@@ -284,11 +331,12 @@ class Question {
     final shuffledBold = boldOptions.length == 4
         ? newOrder.map((i) => boldOptions[i]).toList()
         : boldOptions;
+    // An answerless question stays answerless: indexOf(-1) is -1.
     return Question(
       id: id,
       text: text,
       options: shuffled,
-      correctIndex: newOrder.indexOf(correctIndex),
+      correctIndex: hasAnswer ? newOrder.indexOf(correctIndex) : -1,
       subject: subject,
       sourceId: sourceId,
       sourceLabel: sourceLabel,

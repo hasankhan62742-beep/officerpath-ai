@@ -192,7 +192,8 @@ class _BookSelectionScreenState extends State<BookSelectionScreen> {
                 title: Text(p.title),
                 subtitle: Text(
                   'Pages ${p.startPage}–${p.endPage} • '
-                  '${p.questionCount} MCQs',
+                  '${p.questionCount} MCQs'
+                  '${p.pendingCount > 0 ? ' • ${p.pendingCount} pending' : ''}',
                 ),
                 controlAffinity: ListTileControlAffinity.leading,
               ),

@@ -117,7 +117,7 @@ void main() {
   });
 
   group('G2 table answer-source labelling', () {
-    test('F3 Pak Affairs: 19 table rows count as bold, not key',
+    test('F3 Pak Affairs: 27 table rows count as bold, not key',
         () async {
       final file = File(
         '/home/hatch/workspace/user/files/Pak_Affairs_by_CSPs.pdf',
@@ -129,9 +129,11 @@ void main() {
         'sourceId': 'real-f3',
         'sourceLabel': 'Pak Affairs',
       });
-      expect(maps['parsed'], 181);
+      // 20 Nov 2026 (was 181/19): table fixes recover 8 more real
+      // table rows; all 27 still resolve by bold, not by key.
+      expect(maps['parsed'], 186);
       final sources = maps['answerSources'] as Map;
-      expect(sources['bold'], 19);
+      expect(sources['bold'], 27);
     });
   });
 

@@ -1,8 +1,10 @@
 // Verification status (governing spec 19 Nov 2026): every parsed
 // question carries `answerVerified` — true when the answer comes
 // from the book's own printed/official signal (answer-line, key,
-// tick, bold, asterisk, flashcard), false when it was inferred by
-// AI or the signals conflicted. The v2 preview / manual-correction
+// tick, bold, asterisk), false when it was inferred by
+// AI, the signals conflicted, or the question is a flashcard
+// reconstruction (options generated, never printed). The v2 preview
+// / manual-correction
 // UI reads this flag; an unverified answer must never be presented
 // as correct without review.
 import 'package:flutter_test/flutter_test.dart';

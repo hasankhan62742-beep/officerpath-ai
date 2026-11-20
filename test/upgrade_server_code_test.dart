@@ -1,9 +1,13 @@
+import 'dart:typed_data';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:officerpath_ai/screens/upgrade_screen.dart';
 import 'package:officerpath_ai/services/activation_service.dart';
 import 'package:officerpath_ai/services/payment_proof_service.dart';
+import 'package:officerpath_ai/services/secure_key_store.dart';
 import 'package:officerpath_ai/services/subscription_service.dart';
 import 'package:officerpath_ai/theme/app_theme.dart';
 
@@ -11,8 +15,9 @@ import 'package:officerpath_ai/theme/app_theme.dart';
 /// server code redemption, with fake services (no network, no Supabase).
 ///
 /// The screen itself is pumpable with injected fakes; the real
-/// SubscriptionService cache (SharedPreferences mock) is used, so a
-/// successful redemption really flips isPremium.
+/// SubscriptionService cache (in-memory secure store + SharedPreferences
+/// mock for the free-test counter) is used, so a successful redemption
+/// really flips isPremium.
 
 void _setSmallPhone(WidgetTester tester) {
   tester.view.physicalSize = const Size(360, 640);
@@ -47,6 +52,11 @@ class _FakePayments {
       return saved;
     },
     fetcher: (_) async => List<Map<String, dynamic>>.from(rows),
+    // The receipt screenshot is required for new submissions; the
+    // fake upload returns a canned storage path (no Supabase).
+    uploader:
+        ({required userId, required fileName, required bytes}) async =>
+            'user-1/receipt.jpg',
     isConfigured: () => true,
   );
 }
@@ -74,6 +84,10 @@ void main() {
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     await SubscriptionService.instance.resetForTest();
+    // Premium cache lives in secure storage — inject the in-memory
+    // fake (see subscription_test.dart).
+    SubscriptionService.instance.secureStoreOverride =
+        InMemorySecureStore();
   });
 
   group('UpgradeScreen v2 — code redemption', () {
@@ -198,6 +212,25 @@ void main() {
         scrollable: _listScrollable,
       );
       await tester.pumpAndSettle();
+      // The receipt screenshot is required: attach one via the fake
+      // picker before submitting, like a real user would. The fake
+      // carries the bytes directly (no temp file): async dart:io
+      // (Directory.createTemp) HANGS inside widget tests on this VM —
+      // proven by a minimal repro (usc_minimal_test.dart): plain Dart
+      // creates the temp dir in 9ms, but the widget-test binding
+      // never delivers the async completion, so the test stalls
+      // forever. Bytes avoid the issue entirely, and the screen's
+      // _receiptBytes() prefers f.bytes when present.
+      FilePicker.platform = _FakeReceiptPicker(
+        PlatformFile(
+          name: 'receipt.jpg',
+          bytes: Uint8List.fromList([1, 2, 3]),
+          size: 3,
+        ),
+      );
+      await tester.tap(find.text('Attach receipt screenshot (required)'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Receipt: receipt.jpg'), findsOneWidget);
       // Registered email is prefilled read-only from the account.
       expect(find.text('student@example.com'), findsOneWidget);
       await tester.enterText(
@@ -249,4 +282,29 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   });
+}
+
+/// Fake file picker for widget tests: returns one canned receipt file.
+/// Extends (not implements) FilePicker so the platform-interface token
+/// check passes. (Same fake as upgrade_payment_test.dart.)
+class _FakeReceiptPicker extends FilePicker {
+  _FakeReceiptPicker(this.file);
+
+  final PlatformFile file;
+
+  @override
+  Future<FilePickerResult?> pickFiles({
+    String? dialogTitle,
+    String? initialDirectory,
+    FileType type = FileType.any,
+    List<String>? allowedExtensions,
+    Function(FilePickerStatus)? onFileLoading,
+    bool allowCompression = true,
+    int compressionQuality = 30,
+    bool allowMultiple = false,
+    bool withData = false,
+    bool withReadStream = false,
+    bool lockParentWindow = false,
+    bool readSequential = false,
+  }) async => FilePickerResult([file]);
 }

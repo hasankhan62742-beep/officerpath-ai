@@ -907,4 +907,237 @@ Science
     ]);
     expect(r.formatCounts['table'] ?? 0, 0);
   });
+
+  // ------------------------------------------------------------------
+  // Computer table (20 Nov 2026): the owner's "Computer Most Important
+  // Questions" photo, Q67–81, "Page 5 of 71". Faithful transcription
+  // of the photo's rows as '|' text (one line per row). Option cells
+  // carry explicit markers ("A. Home tab"); the answer letter sits
+  // in an "Ans" column; the correct option is ALSO bold in some rows
+  // (Q69 "B. 1.25", Q70 "A. clip art", Q71 "D. Delete" — the bold
+  // is a second, agreeing signal; the Ans letter decides). The header
+  // is "Sr#" (no dot). The "Page 5 of 71" footer overlaps the bottom
+  // of the Q81 row in the photo; in OCR text it is its own line.
+  // ------------------------------------------------------------------
+  const computerTable = r'''
+Sr# | Question | A | B | C | D | Ans
+67 | From where you can access Save command in Microsoft Word? | A. Home tab | B. Insert tab | C. Review tab | D. None of above | D
+68 | To verify that the note text is positioned correctly on the page, switch to ____ view or display the document in print preview | A. normal | B. print layout | C. page layout | D. page edit | B
+69 | What is the default left margins in word 2003 document? | A. 1 | B. 1.25 | C. 1.5 | D. 2 | B
+70 | Ms Word includes a series of predefined graphics called ____ that can be inserted into a Word document. | A. clip art | B. hyperlinks | C. captions | D. bookmarks | A
+71 | Which key deletes the character to the right of the cursor in Ms Word? | A. End | B. Backspace | C. Home | D. Delete | D
+72 | To exit from the Resume Wizard and return to the document window without creating a resume, click the ____ button in any panel in the Resume Wizard dialog box. | A. Cancel | B. Back | C. Next | D. Finish | D
+73 | A ____ is not attached to an edge of the Word window; that is, it displays in the middle of the Word window and can be moved anywhere in the window | A. floating toolbar | B. scroll bar | C. status toolbar | D. menu bar | A
+74 | Ctrl + J Shortcut key is used in Microsoft Word to ____? | A. Align Justify | B. Insert Hyperlink | C. Search | D. Print | A
+75 | Which of the following is not essential component to perform a mail merge operation? | A. Main document | B. Data source | C. Merge fields | D. Word fields | D
+76 | When you save a file as a Web page, Word converts the contents of the document into ____. | A. Java | B. Perl | C. HTML | D. Unix | C
+77 | Although it is not shown in normal view, to view a header, click ____ on the menu bar and then click Header and Footer. | A. View | B. Edit | C. Format | D. Tools | A
+78 | By default, your document prints with ____? | A. 1 inch top and bottom margins | B. a portrait orientation | C. 1.25 inches left and right margins | D. all of the above | D
+79 | When typing in a word field manually, what must you press to insert the code's brackets? | A. Ctrl + F6 | B. Ctrl + F9 | C. Alt + F11 | D. Shift + F12 | B
+80 | What would you do when you want to update the data in an embedded worksheet range? | A. double click the worksheet range object | B. right click worksheet range object & choose format object | C. edit the data in the destination document | D. edit the data in the source document. | A
+81 | who invented the difference engine and analytical engine? | A. Vint cerf | B. Mark zukerberg | C. Charles Babbage | D. None | C
+Page 5 of 71
+''';
+
+  test('computer table Q67–81: markers stripped, Ans decides, footer skipped',
+      () {
+    final r = parseTableText(computerTable);
+    expect(r.formatCounts['table'], 15, reason: 'all 15 rows parsed');
+    expect(r.parsed, 15);
+    expect(r.skipped, 0);
+    expect(r.answerPending, isEmpty);
+    for (final q in r.questions) {
+      expect(q.text, isNot(contains('Page 5 of 71')));
+      expect(q.text, isNot(contains('Sr#')));
+      for (final o in q.options) {
+        expect(o, isNot(startsWith('A. ')));
+        expect(o, isNot(startsWith('B. ')));
+        expect(o, isNot(startsWith('C. ')));
+        expect(o, isNot(startsWith('D. ')));
+      }
+    }
+    // Q67: markers stripped, Ans D.
+    final q67 = r.questions[0];
+    expect(q67.text, startsWith('From where you can access Save command'));
+    expect(q67.options,
+        ['Home tab', 'Insert tab', 'Review tab', 'None of above']);
+    expect(q67.correctIndex, 3);
+    // Q69: numeric option text after the marker; bold agrees with Ans B.
+    final q69 = r.questions[2];
+    expect(q69.options, ['1', '1.25', '1.5', '2']);
+    expect(q69.correctIndex, 1);
+    // Q70: bold "A. clip art" agrees with Ans A.
+    final q70 = r.questions[3];
+    expect(q70.options, ['clip art', 'hyperlinks', 'captions', 'bookmarks']);
+    expect(q70.correctIndex, 0);
+    // Q80: the 9-word B option ("right click worksheet range object &
+    // choose format object") must not break the row.
+    final q80 = r.questions[13];
+    expect(q80.options[1],
+        'right click worksheet range object & choose format object');
+    expect(q80.correctIndex, 0);
+    // Q81: last row before the footer; footer must not join it.
+    final q81 = r.questions[14];
+    expect(q81.text,
+        'who invented the difference engine and analytical engine?');
+    expect(q81.options,
+        ['Vint cerf', 'Mark zukerberg', 'Charles Babbage', 'None']);
+    expect(q81.correctIndex, 2);
+  });
+
+  test('computer table: option-marker mismatch goes pending, never guessed',
+      () {
+    const mismatch = r'''
+Sr.# | Question | A | B | C | D | Ans
+1 | What is the capital of France? | A. London | B. Paris | C. Berlin | D. Madrid | B
+2 | What is two plus two? | A. Three | B. Four | C. Five | D. Six | B
+3 | What is the colour of the sky? | A. Blue | C. Green | C. Red | D. Yellow | B
+''';
+    final r = parseTableText(mismatch);
+    expect(r.parsed, 2);
+    expect(r.answerPending.length, 1);
+    final pending = r.answerPending.single;
+    expect(pending.text, 'What is the colour of the sky?');
+    expect(pending.options, ['Blue', 'Green', 'Red', 'Yellow']);
+    expect(pending.reason, 'option-marker-mismatch');
+    expect(r.errors.any((e) => e.contains('marker')), isTrue);
+  });
+
+  // ------------------------------------------------------------------
+  // Interjection table (20 Nov 2026): the owner's Q230–257 photo.
+  // Faithful transcription of the photo's rows as '|' text, with the
+  // in-table section headings on their own lines. Bare options (no
+  // markers), an Ans letter, and a topic-label last column. Two rows
+  // are made key-less on purpose: Q249 (normal number — stays
+  // pending WITH its number) and Q162 (misnumbered — stays pending
+  // with NO number). Q258 is a synthetic continuation past the last
+  // heading, proving that heading is skipped too.
+  // ------------------------------------------------------------------
+  const interjectionTable = r'''
+230 | Choose the right one | Neither Ali nor Aslam has taken his test | Neither Ali nor Aslam have taken his test | Neither Ali nor Aslam has taken their test | None of these | A | Corelative Conjunction
+231 | He is ____ worried about his car issue ____ he gets to the garage | so much/that | so/- | -/the | None of these | A | Corelative Conjunction
+232 | He have had ____ trouble ____ he parked the car in the garage. | Much/and | Some/that | So much/that | None of these | C | Corelative Conjunction
+233 | He is looking for a residence ____ in a hostel or in a room? | Or | Either | And | Nor | B | Corelative Conjunction
+234 | His behavior was unprofessional enough ____ he terminated immediately. | That | so | though | None of these | B | Corelative Conjunction
+Interjection
+235 | Which part of speech can act as an independently complete sentence? | Interjection | Conjunction | Noun | Preposition | A | Interjection
+236 | well! I don't think I will be home before 6 pm. In this sentence well is: | Adverb | Adjective | Interjection | None of these | C | Interjection
+237 | WOW! is an: | Adverb | Adjective | Interjection | Conjunction | C | Interjection
+238 | Well is which part of speech: | Conjunction | Interjection | Noun | None of these | B | Interjection
+239 | Identify the underlined parts of speech: Wow! It is a beautiful symphony. | Interjection | Adjective | Article | Conjunction | A | Interjection
+Parts of Speech Identification
+240 | Identify the underlined parts of speech: He also likes to eat strawberries. | Noun | Adverb | Adjective | Verb | D | Identification of Parts of Speech
+241 | Identify the underlined parts of speech: He also likes to eat strawberries. | Noun | Adverb | Adjective | Verb | D | Identification of Parts of Speech
+242 | The cat was ____ by him. | Kill | Killed | Has kill | None of these | B | Identification of Parts of Speech
+243 | Choose the subject used in sentence: 'I met the old beggar across the road': | I | Old | Beggar | Road | A | Identification of Parts of Speech
+244 | I helped him. Here subject is: | I | Helped | Him | I helped | A | Identification of Parts of Speech
+245 | In the sentence 'I know all the people sitting in the hall,' the complete object is: | I know | People | All the people sitting in the hall | In the hall | C | Identification of Parts of Speech
+246 | How many parts of speech? | 7 | 8 | 9 | None of these | B | Identification of Parts of Speech
+247 | Identify the underline part of speech: Faint heart never won fair lady. | Verb | Adjective | Adverb | Noun | A | Identification of Parts of Speech
+Gerund / Infinitives / Participle
+248 | I enjoy ____ tennis. | to playing | Playing | Plays | to play | B | Gerund
+249 | I am ____ to weekend. | Look forward | Look forwarded | Looking forward | None of these | Gerund
+250 | I don't mind ____ if you are tired. | driving | to drive | drive | None of these | A | Gerund
+251 | A ____ is a verb in its present participle form ("ing") that acts as a noun in a sentence | verb | adjective | gerund | adverb | C | Gerund
+252 | 'Ing' used in a sentence. It is called | Gerund | Command | Exclamation | None of these | A | Gerund
+253 | She wants --- a complaint about the waiter. | To make | Making | Made | Makes | A | Infinitive
+162 | I used to ____ hardship of life: | Embrace | Facing | To Face | Face | Infinitive
+164 | Do you want something--- now? | To drink | drinking | for drink | None of these | A | Infinitive
+254 | He wants ____ a cold drink. | Drink | To drink | Drinking | Drinks | B | Infinitive
+255 | 'To help' is which type of verb? | Participle | Infinitive | Gerund | Modal | B | Infinitive
+256 | Replace the underlined word 'He is very obliged.' | Much | many | So | None of these | A | Past Participle
+257 | I am very obliged to him. Correct the following Sentence | Many obliged | Much obliged | So obliged | None of these | B | Past Participle
+Present / Past / Perfect Tenses
+258 | He ___ to school daily. | go | goes | went | gone | B | Present Tense
+''';
+
+  test('interjection table Q230–258: headings skipped, labels kept out, '
+      'misnumbering distrusted', () {
+    final r = parseTableText(interjectionTable);
+    expect(r.parsed, 29, reason: '31 rows minus the 2 key-less pending');
+    expect(r.answerPending.length, 2);
+    expect(r.formatCounts['table'], 29);
+    expect(r.skipped, 0);
+    // No heading or topic label may appear in any question or pending.
+    const forbidden = [
+      'Parts of Speech Identification',
+      'Gerund / Infinitives / Participle',
+      'Present / Past / Perfect Tenses',
+      'Corelative Conjunction',
+      'Identification of Parts of Speech',
+      'Past Participle',
+      'Present Tense',
+    ];
+    for (final q in r.questions) {
+      for (final f in forbidden) {
+        expect(q.text, isNot(contains(f)), reason: 'heading/label in stem');
+        for (final o in q.options) {
+          expect(o, isNot(contains(f)), reason: 'heading/label in option');
+        }
+      }
+    }
+    for (final p in r.answerPending) {
+      for (final f in forbidden) {
+        expect(p.text, isNot(contains(f)));
+      }
+    }
+    // Q230: the 8-word options parse.
+    final q230 = r.questions[0];
+    expect(q230.text, 'Choose the right one');
+    expect(q230.options, [
+      'Neither Ali nor Aslam has taken his test',
+      'Neither Ali nor Aslam have taken his test',
+      'Neither Ali nor Aslam has taken their test',
+      'None of these',
+    ]);
+    expect(q230.correctIndex, 0);
+    // Q235: first row after the "Interjection" heading — clean stem.
+    final q235 = r.questions[5];
+    expect(q235.text,
+        'Which part of speech can act as an independently complete sentence?');
+    expect(q235.correctIndex, 0);
+    // Q237: short stem ending in ':'.
+    final q237 = r.questions[7];
+    expect(q237.text, 'WOW! is an:');
+    expect(q237.correctIndex, 2);
+    // Q243/Q244: the pronoun "I" is an option value, not a stem.
+    final q243 = r.questions[13];
+    expect(q243.options, ['I', 'Old', 'Beggar', 'Road']);
+    expect(q243.correctIndex, 0);
+    final q244 = r.questions[14];
+    expect(q244.options, ['I', 'Helped', 'Him', 'I helped']);
+    expect(q244.correctIndex, 0);
+    // Q246: numeric options.
+    final q246 = r.questions[16];
+    expect(q246.text, 'How many parts of speech?');
+    expect(q246.options, ['7', '8', '9', 'None of these']);
+    expect(q246.correctIndex, 1);
+    // Q248: first row after the "Gerund / Infinitives / Participle"
+    // heading — clean stem.
+    final q248 = r.questions[18];
+    expect(q248.text, 'I enjoy ____ tennis.');
+    expect(q248.correctIndex, 1);
+    // Q253, then the misnumbered rows: their Ans answers are
+    // positional, so the number distrust must not touch them.
+    final q253 = r.questions[22];
+    expect(q253.correctIndex, 0);
+    final q164 = r.questions[23];
+    expect(q164.text, startsWith('Do you want something'));
+    expect(q164.correctIndex, 0);
+    final q254 = r.questions[24];
+    expect(q254.correctIndex, 1);
+    // Q258: first row after the last heading — clean stem.
+    final q258 = r.questions[28];
+    expect(q258.text, 'He ___ to school daily.');
+    expect(q258.correctIndex, 1);
+    // Pending: Q249 keeps its number; Q162 (out of sequence) has none.
+    final pending249 = r.answerPending.firstWhere(
+        (p) => p.text == 'I am ____ to weekend.');
+    expect(pending249.number, 249);
+    final pending162 = r.answerPending
+        .firstWhere((p) => p.text.startsWith('I used to'));
+    expect(pending162.number, isNull);
+    // The break is reported plainly.
+    expect(r.errors.any((e) => e.contains('162 after 253')), isTrue);
+  });
 }

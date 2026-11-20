@@ -1,3 +1,6 @@
+import 'dart:math';
+import 'dart:typed_data';
+
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'subscription_service.dart';
@@ -14,6 +17,7 @@ class PaymentProof {
     required this.status,
     this.email,
     this.createdAt,
+    this.screenshotPath,
   });
 
   factory PaymentProof.fromJson(Map<String, dynamic> json) {
@@ -28,6 +32,7 @@ class PaymentProof {
       createdAt: json['created_at'] == null
           ? null
           : DateTime.tryParse(json['created_at'].toString()),
+      screenshotPath: json['screenshot_path'] as String?,
     );
   }
 
@@ -43,6 +48,11 @@ class PaymentProof {
   final String status;
   final String? email;
   final DateTime? createdAt;
+
+  /// Storage path of the receipt screenshot in the private
+  /// `payment-proofs` bucket (`<user_id>/<unique>.jpg`), or null for
+  /// proofs submitted before the screenshot became required.
+  final String? screenshotPath;
 
   /// Display label for the status: Pending / Approved / Rejected.
   String get statusLabel {
@@ -85,6 +95,16 @@ typedef PaymentRowInserter =
 typedef PaymentRowsFetcher =
     Future<List<Map<String, dynamic>>> Function(String userId);
 
+/// Uploads a receipt screenshot to the private `payment-proofs`
+/// bucket and returns the storage path (`<user_id>/<unique>.jpg`).
+/// Injected for tests.
+typedef PaymentScreenshotUploader =
+    Future<String> Function({
+      required String userId,
+      required String fileName,
+      required List<int> bytes,
+    });
+
 /// Payment-proof submission (v2.0) — the student pays manually
 /// (Easypaisa / JazzCash) and submits the transaction ID here. The row
 /// lands in the server `payments` table with status `pending`; the
@@ -101,10 +121,12 @@ class PaymentProofService {
     AccountProvider? accountProvider,
     PaymentRowInserter? inserter,
     PaymentRowsFetcher? fetcher,
+    PaymentScreenshotUploader? uploader,
     bool Function()? isConfigured,
   }) : _accountProvider = accountProvider ?? _defaultAccount,
        _inserter = inserter ?? _defaultInsert,
        _fetcher = fetcher ?? _defaultFetch,
+       _uploader = uploader ?? _defaultUploadScreenshot,
        _isConfigured = isConfigured ?? (() => SupabaseConfig.isConfigured);
 
   static final PaymentProofService instance = PaymentProofService();
@@ -112,6 +134,7 @@ class PaymentProofService {
   final AccountProvider _accountProvider;
   final PaymentRowInserter _inserter;
   final PaymentRowsFetcher _fetcher;
+  final PaymentScreenshotUploader _uploader;
   final bool Function() _isConfigured;
 
   /// The signed-in user's id, or null when signed out / offline.
@@ -156,12 +179,15 @@ class PaymentProofService {
 
   /// The exact row inserted into `payments`. Pure — unit-tested.
   /// `plan` is the plan id; `status` is always `pending` on submit.
+  /// `screenshotPath` is the private-bucket path of the receipt
+  /// screenshot — required for new submissions.
   static Map<String, dynamic> buildProofPayload({
     required String userId,
     required String? email,
     required String planId,
     required String method,
     required String transactionId,
+    required String screenshotPath,
   }) {
     return {
       'user_id': userId,
@@ -170,16 +196,23 @@ class PaymentProofService {
       'method': method,
       'transaction_id': transactionId.trim(),
       'status': 'pending',
+      'screenshot_path': screenshotPath,
     };
   }
 
   /// Submits a payment proof for the signed-in user. Never throws for
   /// a validation / account / server problem — those come back as a
   /// failed [PaymentProofSubmitResult] with a plain-language [error].
+  /// The receipt screenshot ([screenshotBytes]) is REQUIRED: without
+  /// it the owner cannot verify the payment reached his account.
+  /// It is uploaded to the private `payment-proofs` bucket first;
+  /// the payments row stores its storage path.
   Future<PaymentProofSubmitResult> submitPaymentProof({
     required String plan,
     required String method,
     required String transactionId,
+    List<int>? screenshotBytes,
+    String? screenshotName,
   }) async {
     final txError = validateTransactionId(transactionId);
     if (txError != null) return PaymentProofSubmitResult.failure(txError);
@@ -205,6 +238,46 @@ class PaymentProofService {
         'on WhatsApp instead and the owner will activate your Premium.',
       );
     }
+    // The receipt screenshot is REQUIRED: without it the owner cannot
+    // verify the payment reached his account (Easypaisa/JazzCash have
+    // no lookup API — the screenshot is the only confirmation).
+    if (screenshotBytes == null || screenshotBytes.isEmpty) {
+      return PaymentProofSubmitResult.failure(
+        'Please attach your payment receipt screenshot first — it is '
+        'needed to verify your payment.',
+      );
+    }
+    // UX-only duplicate check: the server is the authority (the
+    // issue-code function refuses an already-spent transaction ID,
+    // backed by the approved-TID unique index), but catching our own
+    // repeat here saves a wasted review round-trip — and a refused
+    // repeat never uploads a file. Fail-open: if the list cannot be
+    // loaded, submit anyway and let the server decide.
+    final prior = await myPayments();
+    final tid = transactionId.trim();
+    if (prior.any((p) => p.transactionId.trim() == tid)) {
+      return PaymentProofSubmitResult.failure(
+        'You already submitted this transaction ID. If you paid again, '
+        'enter the new transaction ID from your payment app.',
+      );
+    }
+    // Upload the receipt first; the payments row stores its path.
+    // A failed insert after a successful upload leaves an orphaned
+    // file in the private bucket (harmless; the user simply retries
+    // and a new unique path is used).
+    late final String screenshotPath;
+    try {
+      screenshotPath = await _uploader(
+        userId: account.id,
+        fileName: screenshotName ?? 'receipt.jpg',
+        bytes: screenshotBytes,
+      );
+    } catch (_) {
+      return PaymentProofSubmitResult.failure(
+        'Could not upload your receipt screenshot. Check your '
+        'connection and try again.',
+      );
+    }
     try {
       final row = await _inserter(
         buildProofPayload(
@@ -213,6 +286,7 @@ class PaymentProofService {
           planId: plan,
           method: method,
           transactionId: transactionId,
+          screenshotPath: screenshotPath,
         ),
       );
       return PaymentProofSubmitResult.success(PaymentProof.fromJson(row));
@@ -266,6 +340,37 @@ class PaymentProofService {
         .select()
         .single();
     return Map<String, dynamic>.from(inserted as Map);
+  }
+
+  /// Uploads the receipt screenshot to the private `payment-proofs`
+  /// bucket at `<user_id>/<milliseconds>_<random>.jpg|png` and
+  /// returns the storage path. Runs with the user's own session, so
+  /// the storage RLS policy (uid folder only) enforces the path.
+  /// `upsert: false` + a unique name means an upload never overwrites
+  /// another user's (or an earlier) receipt.
+  static Future<String> _defaultUploadScreenshot({
+    required String userId,
+    required String fileName,
+    required List<int> bytes,
+  }) async {
+    final ext = fileName.contains('.')
+        ? fileName.split('.').last.toLowerCase()
+        : 'jpg';
+    final safeExt = ext == 'png' ? 'png' : 'jpg';
+    final unique =
+        '${DateTime.now().millisecondsSinceEpoch}_${Random().nextInt(1 << 32)}.$safeExt';
+    final path = '$userId/$unique';
+    await Supabase.instance.client.storage
+        .from('payment-proofs')
+        .uploadBinary(
+          path,
+          Uint8List.fromList(bytes),
+          fileOptions: FileOptions(
+            contentType: safeExt == 'png' ? 'image/png' : 'image/jpeg',
+            upsert: false,
+          ),
+        );
+    return path;
   }
 
   static Future<List<Map<String, dynamic>>> _defaultFetch(

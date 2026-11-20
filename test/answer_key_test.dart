@@ -275,7 +275,8 @@ void main() {
   test('parseKeyEntries: token stream handles every entry shape', () {
     final entries = parseKeyEntries(
       '1. C 2-C 3) B 4: D Q5: A 6. Asif Ali Zardari 7. B) Hafeez Jalandhari '
-      '61. (C) 3 62. (A) Portable Document Format 74. (A) 43.75% English',
+      '61. (C) 3 62. (A) Portable Document Format 74. (A) 43.75% English '
+      'Q8 C Q9: D',
     );
     expect(entries, {
       1: 'C',
@@ -284,6 +285,9 @@ void main() {
       4: 'D',
       5: 'A',
       6: 'Asif Ali Zardari',
+      // "Q8 C" (no separator after the number) normalises to "Q8: C".
+      8: 'C',
+      9: 'D',
       // Letter + text is kept WHOLE (the caller resolves letter-first);
       // "(C) 3" keeps its letter too, and "43.75%" is never read as a
       // bogus entry 43.
@@ -346,6 +350,115 @@ void main() {
     // like a question); the key adds no skips.
     expect(result.skipped, 0);
     expect(result.errors, isEmpty);
+  });
+
+  // ------------------------------------------------------------------
+  // Strict paper rule (20 Nov 2026, owner: a must, not a nice-to-have):
+  // a key inside the same PDF applies ONLY to the paper with the SAME
+  // title. Never one paper's key to another paper.
+  // ------------------------------------------------------------------
+  test('strict paper: key titled "Paper 60" fills only Paper 60', () {
+    const text = 'Paper 60\n'
+        'Q1. Capital of Pakistan?\n'
+        'A) Lahore\nB) Karachi\nC) Islamabad\nD) Quetta\n'
+        'Q2. Capital of France?\n'
+        'A) London\nB) Paris\nC) Rome\nD) Berlin\n'
+        'Q3. Capital of Italy?\n'
+        'A) Madrid\nB) Rome\nC) Paris\nD) Athens\n'
+        'Paper 61\n'
+        'Q1. Capital of Spain?\n'
+        'A) Madrid\nB) Barcelona\nC) Seville\nD) Valencia\n'
+        'Q2. Capital of Germany?\n'
+        'A) Munich\nB) Hamburg\nC) Berlin\nD) Bonn\n'
+        'Q3. Capital of Portugal?\n'
+        'A) Porto\nB) Lisbon\nC) Faro\nD) Braga\n'
+        'ANSWER KEY PAPER 60\n'
+        '1. C\n'
+        '2. B\n'
+        '3. B\n';
+    final r = parseMcqs(text, sourceId: _src, sourceLabel: _label);
+    // Paper 60's three questions are answered by its own key; Paper
+    // 61's three share Q-numbers (1–3) but stay pending — the key
+    // must never leak across, even though the numbers match.
+    expect(r.parsed, 3);
+    expect(r.keyEntriesApplied, 3);
+    expect(r.answerPending.length, 3);
+    expect(
+      r.questions.map((q) => q.correctIndex).toList(),
+      [2, 1, 1],
+    );
+    expect(
+      r.answerPending.map((p) => p.text).toList(),
+      contains('Capital of Portugal?'),
+    );
+    expect(
+      r.answerPending.every((p) => p.paper == 'Paper 61'),
+      isTrue,
+    );
+    // The attribution names the paper the key attached to.
+    expect(
+      r.keyPaperReport.any(
+        (l) => l.contains('Paper 60') && l.contains('3 jawab'),
+      ),
+      isTrue,
+    );
+    // The key text never appears in the parsed questions.
+    for (final q in r.questions) {
+      expect(q.text, isNot(contains('ANSWER KEY')));
+      for (final o in q.options) {
+        expect(o, isNot(contains('ANSWER KEY')));
+      }
+    }
+    for (final p in r.answerPending) {
+      expect(p.text, isNot(contains('ANSWER KEY')));
+    }
+  });
+
+  test('strict paper: key for a paper not in the import applies to nothing',
+      () {
+    const text = 'Paper 61\n'
+        'Q1. Capital of Spain?\n'
+        'A) Madrid\nB) Barcelona\nC) Seville\nD) Valencia\n'
+        'Q2. Capital of Germany?\n'
+        'A) Munich\nB) Hamburg\nC) Berlin\nD) Bonn\n'
+        'ANSWER KEY PAPER 60\n'
+        '1. C\n'
+        '2. B\n';
+    final r = parseMcqs(text, sourceId: _src, sourceLabel: _label);
+    expect(r.parsed, 0);
+    expect(r.keyEntriesApplied, 0);
+    expect(r.answerPending.length, 2);
+    expect(
+      r.keyPaperReport.any(
+        (l) => l.contains('Paper 60') && l.contains('key nahi lagayi'),
+      ),
+      isTrue,
+    );
+  });
+
+  test('strict paper: bare key attaches to the preceding paper, with attribution',
+      () {
+    const text = 'Paper 60\n'
+        'Q1. Capital of Pakistan?\n'
+        'A) Lahore\nB) Karachi\nC) Islamabad\nD) Quetta\n'
+        'Q2. Capital of France?\n'
+        'A) London\nB) Paris\nC) Rome\nD) Berlin\n'
+        'ANSWER KEY\n'
+        '1. C\n'
+        '2. B\n';
+    final r = parseMcqs(text, sourceId: _src, sourceLabel: _label);
+    expect(r.parsed, 2);
+    expect(r.keyEntriesApplied, 2);
+    expect(
+      r.questions.map((q) => q.correctIndex).toList(),
+      [2, 1],
+    );
+    expect(
+      r.keyPaperReport.any(
+        (l) => l.contains('Paper 60') && l.contains('2 jawab'),
+      ),
+      isTrue,
+    );
   });
 }
 

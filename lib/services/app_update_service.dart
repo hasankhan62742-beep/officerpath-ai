@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:http/http.dart' as http;
 import 'package:ota_update/ota_update.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -14,6 +15,22 @@ import 'package:shared_preferences/shared_preferences.dart';
 ///   3. If newer, download the arm64 APK and hand it to the Android
 ///      system installer (ota_update). Android asks the user once to
 ///      allow "Install unknown apps" for OfficerPath.
+///
+/// VERIFICATION (M3, v2.0.0): the release carries a SHA-256 sidecar,
+/// `officerpath-ai-<version>-arm64.apk.sha256`, published by CI
+/// (see .github/workflows/build-apk.yml). [checkForUpdate] fetches that
+/// sidecar over HTTPS from the same release API response, and
+/// [downloadAndInstall] FAILS CLOSED without a valid expected hash:
+/// it never starts a download, and the installer is never triggered.
+/// When a hash is present it is passed to `OtaUpdate.execute()` as
+/// `sha256checksum`; the plugin's native code (ota_update 7.1.0,
+/// `Sha256ChecksumValidator`) hashes the downloaded file and only
+/// triggers the installer when the hash matches — on mismatch it
+/// emits [OtaStatus.CHECKSUM_ERROR] and does NOT install. The Dart
+/// side never sees the downloaded file (the plugin owns the
+/// download -> install handoff), so the hash check on the live path is
+/// enforced natively; [verifyApkBytes] is the pure-Dart form of the
+/// same rule (size first, then SHA-256) and is what the tests cover.
 ///
 /// HONEST LIMITS:
 /// * The user still taps "Install" on the system prompt — Android never
@@ -34,6 +51,8 @@ class AppUpdateInfo {
     required this.downloadUrl,
     required this.fileName,
     required this.assetSize,
+    this.checksumUrl,
+    this.sha256,
   });
 
   /// Version without the leading 'v', e.g. '1.3.0'.
@@ -50,6 +69,26 @@ class AppUpdateInfo {
 
   /// Asset size in bytes (0 when GitHub does not report it).
   final int assetSize;
+
+  /// Direct download URL of the `<fileName>.sha256` sidecar asset, or
+  /// null when the release carries no checksum asset.
+  final String? checksumUrl;
+
+  /// Expected SHA-256 of the APK (lowercase hex), fetched from
+  /// [checksumUrl] by [AppUpdateService.checkForUpdate]. Null until
+  /// fetched, and null when the release has no usable checksum —
+  /// [AppUpdateService.downloadAndInstall] refuses to install then.
+  final String? sha256;
+
+  AppUpdateInfo copyWith({String? sha256}) => AppUpdateInfo(
+    latestVersion: latestVersion,
+    tag: tag,
+    downloadUrl: downloadUrl,
+    fileName: fileName,
+    assetSize: assetSize,
+    checksumUrl: checksumUrl,
+    sha256: sha256 ?? this.sha256,
+  );
 }
 
 class AppUpdateService {
@@ -113,22 +152,95 @@ class AppUpdateService {
   static bool isNewer(String latest, String current) =>
       compareVersions(latest, current) > 0;
 
-  /// Picks the arm64 APK from a release's assets. Prefers an asset whose
-  /// name ends with '-arm64.apk'; falls back to any '.apk' asset.
+  /// Picks the arm64 APK from a release's assets. Only an asset whose
+  /// name ends with '-arm64.apk' counts — there is deliberately NO
+  /// fallback to any other '.apk' asset (M3): installing a wrong-ABI
+  /// or wrong-file APK must never happen silently.
   static Map<String, dynamic>? pickApkAsset(List<dynamic> assets) {
-    Map<String, dynamic>? fallback;
     for (final a in assets) {
       if (a is! Map<String, dynamic>) continue;
       final name = (a['name'] as String?) ?? '';
-      if (!name.toLowerCase().endsWith('.apk')) continue;
-      fallback ??= a;
       if (name.toLowerCase().endsWith('-arm64.apk')) return a;
     }
-    return fallback;
+    return null;
+  }
+
+  /// Picks the SHA-256 sidecar for [apkName] from a release's assets:
+  /// the asset whose name is the APK name plus '.sha256'. Null when
+  /// absent.
+  static Map<String, dynamic>? pickChecksumAsset(
+    List<dynamic> assets,
+    String apkName,
+  ) {
+    if (apkName.isEmpty) return null;
+    final wanted = '$apkName.sha256';
+    for (final a in assets) {
+      if (a is! Map<String, dynamic>) continue;
+      if ((a['name'] as String?) == wanted) return a;
+    }
+    return null;
+  }
+
+  /// True when [value] is a 64-character hex string (either case).
+  static bool isValidSha256Hex(String? value) {
+    if (value == null || value.length != 64) return false;
+    return RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(value);
+  }
+
+  /// Parses a `.sha256` sidecar body and returns the expected hash
+  /// (lowercase hex), or null when the content is unusable. Accepts
+  /// the `sha256sum` format (`<hash>  <filename>`, the `*` binary
+  /// marker tolerated) and a bare `<hash>` line. When a filename is
+  /// present it must match [apkFileName] exactly — a checksum for a
+  /// different file is rejected rather than trusted.
+  static String? parseSha256Content(String content, String apkFileName) {
+    for (final rawLine in content.split('\n')) {
+      final line = rawLine.trim();
+      if (line.isEmpty) continue;
+      final parts = line.split(RegExp(r'\s+'));
+      final hash = parts.first.toLowerCase();
+      if (!isValidSha256Hex(hash)) return null;
+      if (parts.length > 1) {
+        var name = parts[1];
+        if (name.startsWith('*')) name = name.substring(1);
+        if (name != apkFileName) return null;
+      }
+      return hash;
+    }
+    return null;
+  }
+
+  /// SHA-256 hex digest (lowercase) of [bytes].
+  static String sha256Hex(List<int> bytes) =>
+      crypto.sha256.convert(bytes).toString();
+
+  /// True when [actualBytes] matches [expectedSize]. An expected size
+  /// of 0 means "unknown" (GitHub did not report one) and is not a
+  /// failure — the hash check below is what enforces integrity then.
+  static bool matchesExpectedSize(int actualBytes, int expectedSize) =>
+      expectedSize <= 0 || actualBytes == expectedSize;
+
+  /// Verifies downloaded APK bytes against the release metadata:
+  /// size first (cheap early-out), then SHA-256. This is the
+  /// pure-Dart form of the rule the native updater enforces on the
+  /// live path (see the class doc): a size mismatch fails here, and
+  /// any byte difference — including a size difference — fails the
+  /// hash, so the hash alone subsumes the size check.
+  static bool verifyApkBytes(
+    List<int> bytes,
+    String expectedSha256,
+    int expectedSize,
+  ) {
+    if (!matchesExpectedSize(bytes.length, expectedSize)) return false;
+    if (!isValidSha256Hex(expectedSha256)) return false;
+    return sha256Hex(bytes).toLowerCase() == expectedSha256.toLowerCase();
   }
 
   /// Builds the update info from a `releases/latest` JSON body, or null
-  /// when there is no newer version or no usable APK asset.
+  /// when there is no newer version or no usable APK asset. The
+  /// checksum itself is NOT fetched here (this is a pure sync parse);
+  /// [checkForUpdate] fills [AppUpdateInfo.sha256] from
+  /// [AppUpdateInfo.checksumUrl] afterwards.
   static AppUpdateInfo? parseLatestRelease(
     Map<String, dynamic> json,
     String currentVersion,
@@ -145,18 +257,28 @@ class AppUpdateService {
     final url = (asset['browser_download_url'] as String?) ?? '';
     final name = (asset['name'] as String?) ?? '';
     if (url.isEmpty || name.isEmpty) return null;
+    final checksumAsset = pickChecksumAsset(assets, name);
+    final checksumUrl =
+        (checksumAsset?['browser_download_url'] as String?) ?? '';
     return AppUpdateInfo(
       latestVersion: latestVersion,
       tag: tag,
       downloadUrl: url,
       fileName: name,
       assetSize: (asset['size'] as num?)?.toInt() ?? 0,
+      checksumUrl: checksumUrl.isEmpty ? null : checksumUrl,
     );
   }
 
   /// Checks GitHub for a newer release. Returns null when up to date,
   /// offline, rate-limited, or the check fails for any reason — an
   /// update check must never crash the app or block startup.
+  ///
+  /// When a newer release is found, its `.sha256` sidecar (if any) is
+  /// fetched over HTTPS from the same release response and parsed into
+  /// [AppUpdateInfo.sha256]. A missing or unparseable checksum does NOT
+  /// hide the update — it is enforced later: [downloadAndInstall]
+  /// refuses to install without a valid expected hash.
   Future<AppUpdateInfo?> checkForUpdate({http.Client? client}) async {
     if (!selfUpdateEnabled) return null;
     try {
@@ -172,7 +294,21 @@ class AppUpdateService {
         if (res.statusCode != 200) return null;
         final json = jsonDecode(res.body);
         if (json is! Map<String, dynamic>) return null;
-        return parseLatestRelease(json, info.version);
+        final parsed = parseLatestRelease(json, info.version);
+        if (parsed == null) return null;
+        final checksumUrl = parsed.checksumUrl;
+        if (checksumUrl == null || checksumUrl.isEmpty) return parsed;
+        try {
+          final sumRes = await httpClient
+              .get(Uri.parse(checksumUrl))
+              .timeout(const Duration(seconds: 15));
+          if (sumRes.statusCode != 200) return parsed;
+          final sha256 = parseSha256Content(sumRes.body, parsed.fileName);
+          if (sha256 == null) return parsed;
+          return parsed.copyWith(sha256: sha256);
+        } catch (_) {
+          return parsed;
+        }
       } finally {
         if (client == null) httpClient.close();
       }
@@ -184,10 +320,29 @@ class AppUpdateService {
   /// Downloads the APK and triggers the system installer. The returned
   /// stream reports progress (OtaEvent). The caller shows progress and
   /// handles errors; Android shows the install prompt itself.
+  ///
+  /// FAIL CLOSED (M3): when [update.sha256] is missing or not a valid
+  /// SHA-256 hex string, no download is started and the installer is
+  /// never triggered — the stream emits a single
+  /// [OtaStatus.CHECKSUM_ERROR] event instead. When a valid hash is
+  /// present it is passed to the updater as `sha256checksum`, and the
+  /// plugin verifies the downloaded file's hash BEFORE triggering the
+  /// installer (mismatch -> CHECKSUM_ERROR, no install).
   Stream<OtaEvent> downloadAndInstall(AppUpdateInfo update) {
+    final expected = update.sha256;
+    if (expected == null || !isValidSha256Hex(expected)) {
+      return Stream<OtaEvent>.value(
+        OtaEvent(
+          OtaStatus.CHECKSUM_ERROR,
+          'Update ki tasdeeq nahi ho saki (checksum missing) — install '
+          'roka gaya.',
+        ),
+      );
+    }
     return OtaUpdate().execute(
       update.downloadUrl,
       destinationFilename: update.fileName,
+      sha256checksum: expected.toLowerCase(),
     );
   }
 

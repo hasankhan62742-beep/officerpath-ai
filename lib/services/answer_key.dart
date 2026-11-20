@@ -27,23 +27,37 @@
 ///    questions immediately PRECEDE it — a key printed at the top of a
 ///    page belongs to the paper that ended on the previous page, not
 ///    to the paper whose heading follows it. A key entry that matches
-///    no question in its own segment gets a second chance in other
-///    segments (only when that segment's own key has no entry for the
-///    number); entries matching nothing anywhere are reported in
+///    no question in its own segment is reported in
 ///    [SegmentedText.unmatchedKeyEntries] via the parser, never
-///    silently dropped or force-joined.
+///    silently dropped or force-joined to another paper (strict paper
+///    rule, owner 20 Nov 2026: one paper's key NEVER answers another
+///    paper's questions, even when that paper's own key has no entry
+///    for the number).
 ///
 /// 2. **Key-entry parsing.** A key section is treated as one token
 ///    stream ([parseKeyEntries]), so compact runs ("1.C 2.A 3.B …" on
 ///    one line) and multi-column layouts (entries out of reading order)
 ///    both work — entries are looked up by number, never by position.
 ///    Supported entry shapes: "1. C", "1-C", "1) C", "1: C", "Q1: C",
-///    "1. A) Asif Ali Zardari" (letter + text), "61. (C) 3" and
+///    "Q1 C" (a Q-prefixed entry needs no separator), "1. A) Asif Ali
+///    Zardari" (letter + text), "61. (C) 3" and
 ///    "62. (A) Portable Document Format" (number + "(letter)" + full
 ///    answer text — the letter wins, the text is the fallback), and
 ///    "1. Asif Ali Zardari" (answer as TEXT, matched against the
-///    question's options by the caller via `_resolveAnswer`).
+///    question's options by the caller via [resolveAnswerToken]).
+///
+/// Strict paper rule (owner, 20 Nov 2026): a key applies ONLY to the
+/// paper it names. A key entry joins the question with the same
+/// number in the SAME segment — never another paper, even when that
+/// paper's key has no entry for the number (the old cross-paper
+/// "second chance" fallback is gone). [SegmentedText.explicitKeyPapers]
+/// records which papers were named explicitly by a key heading, so
+/// the parser can report a key whose paper has no questions at all
+/// instead of silently applying it elsewhere.
 library;
+
+import '../models/question.dart';
+import 'paper_identity.dart';
 
 /// Inline marker the extractor appends at the END of a bold text run
 /// (U+E000, private use — never in real book text). The parser reads
@@ -148,6 +162,7 @@ class SegmentedText {
     required this.keyEntries,
     required this.keySectionsFound,
     this.noiseLinesFiltered = 0,
+    this.explicitKeyPapers = const {},
   });
 
   final List<SegmentedLine> questionLines;
@@ -159,13 +174,29 @@ class SegmentedText {
   /// How many key headings were found (0 when the book has no key).
   final int keySectionsFound;
 
+  /// Papers a key heading NAMED explicitly ("Answers – Paper 60",
+  /// "ANSWER KEY PAPER 60") — as opposed to papers a bare heading
+  /// ("ANSWER KEY") was merely attributed to via the preceding
+  /// questions. Strict paper rule (owner, 20 Nov 2026): entries under
+  /// an explicit paper apply ONLY to that paper; an explicit paper
+  /// with no questions in the import is reported, never silently
+  /// applied elsewhere.
+  final Set<String> explicitKeyPapers;
+
   /// Watermark / promo / phone noise lines filtered out before
   /// parsing (Examveda / organisation files). They never became
   /// question lines.
   final int noiseLinesFiltered;
 }
 
-final _paperKindRe = r'(paper|test|set|part|section)';
+/// "Model" is a qualifier, not a kind: "MODEL PAPER 66" and
+/// "ANSWER KEY: Model Paper 66" (PPSC-66, 20 Nov 2026 — the word
+/// "Model" used to break both the paper-heading match and the
+/// key-heading paper-ref strip, so the whole key went unrecognised).
+/// The optional prefix is non-capturing, so the kind (group 1) and
+/// id (group 2) numbering is unchanged everywhere this fragment is
+/// used (paper headings, paper references, key-heading strips).
+final _paperKindRe = r'(?:model\s+)?(paper|test|set|part|section)';
 final _paperIdRe = r'([0-9]+|[A-Z])';
 
 /// "Paper 1", "Paper No. 1", "Test 2", "Set A" — the whole line must be
@@ -185,6 +216,17 @@ final _paperRefRe = RegExp(
 /// Key-heading words, after any paper reference has been stripped.
 final _keyCoreRe = RegExp(
   r'^(answer\s*keys?|answers?|answer\s*sheet|correct\s*answers?|keys?)\s*[:\-–—]?\s*$',
+  caseSensitive: false,
+);
+
+/// An "Explanation:" / "Associated Information:" heading (PPSC-66
+/// Paper 67, 20 Nov 2026): prose + bullets explaining the PREVIOUS
+/// question's answer — never a question. The whole line must be just
+/// the heading (optional colon, optional leading bullet/dash), so a
+/// stem that merely mentions explanation ("Explanation of the term
+/// …") never matches.
+final _explanationHeadingRe = RegExp(
+  r'^[-•\s]*(explanation|associated\s+information)\s*:?\s*$',
   caseSensitive: false,
 );
 
@@ -251,8 +293,12 @@ String? monthHeadingLabel(String line) {
 /// there must be whitespace, an answer letter, or end of blob — so a
 /// decimal inside an answer ("43.75%") is never read as a new entry
 /// ("43."), while compact runs ("1.C 2.A") still work.
+// The lookahead accepts A–E, not just A–D: E is a real answer
+// letter for 5-option questions (fiveOptionAnswerE), so a key entry
+// "1-E" must be PARSED (and then reported unresolved if the question
+// has only 4 options) rather than silently dropped.
 final _keyEntryStartRe = RegExp(
-  r'(?:^|\s)(?:Q\s*)?(\d+)\s*[\.\)\:\-](?=\s|[A-Da-d]\b|$)',
+  r'(?:^|\s)(?:Q\s*)?(\d+)\s*[\.\)\:\-](?=\s|[A-Ea-e]\b|$)',
   caseSensitive: false,
 );
 
@@ -294,6 +340,18 @@ bool isNoiseLine(String line) {
     return true;
   }
   if (lower.contains('for more informative material')) return true;
+  // Running header / page furniture (PPSC-66, 20 Nov 2026): a book
+  // title + page number that repeats on every page — never a
+  // question. "Papers of 2021 521" (title + year + page) and "526
+  // Advanced PPSC MCQs Model Papers (Volume 2)" (page + title +
+  // volume). Neither shape can be a question stem: a stem never
+  // starts with "Papers of YYYY NNN" and never ends with "(Volume
+  // N)". A bare-numbered question ("52 Who founded …?") matches
+  // neither — it has no "(Volume N)" tail and no "Papers of" head.
+  if (RegExp(r'^papers of \d{4} \d+$').hasMatch(lower)) return true;
+  if (RegExp(r'^\d{2,4}\s+\S.*\(volume \d+\)$').hasMatch(lower)) {
+    return true;
+  }
   // Bare phone-number line: only digits/spaces/+/-/()/., ≥7 digits.
   if (RegExp(r'^[\d\s\+\-\(\)\.]{7,}$').hasMatch(t) &&
       RegExp(r'\d').allMatches(t).length >= 7 &&
@@ -339,7 +397,11 @@ bool _isNumericOptionRun(List<String> lines, int index) {
 bool _isKeyOnlyLine(String line) {
   // Bold markers (U+E000) and ticks are extractor plumbing, not
   // text: the MPT key table is bold, so "57. A" must match.
-  final t = stripBoldMarkers(line).replaceAll(RegExp(r'[✓✔]'), '').trim();
+  // Q-prefixed entry with no separator ("Q1 C") is normalised first,
+  // so it counts as a key entry here too.
+  final t = _normaliseBareQEntries(
+    stripBoldMarkers(line).replaceAll(RegExp(r'[✓✔]'), ''),
+  ).trim();
   if (t.isEmpty) return false;
   // (?=\s|$) after the letter/? — a bare "?" has no word boundary
   // (\b fails after a non-word char at end of string), so \b is
@@ -463,6 +525,24 @@ bool _startsQuestionWithOptions(List<String> lines, int i) {
   return false;
 }
 
+/// A Q-prefixed key entry with NO separator ("Q1 C", "Q12 B" — the
+/// typed form) is rewritten to the separated form ("Q1: C") before
+/// entry scanning, so the same entry regex handles it. The letter
+/// must not be followed by a letter/digit, so "Q1 Correct …" is
+/// never rewritten, and the Q must not be part of a longer word, so
+/// "FAQ1 C" is untouched. Used by [parseKeyEntries] and by
+/// [_isKeyOnlyLine], so a typed/pasted key and a key section agree on
+/// which shapes are entries.
+String _normaliseBareQEntries(String s) {
+  return s.replaceAllMapped(
+    RegExp(
+      r'(^|[^A-Za-z0-9])Q\s*(\d+)\s+([A-Da-d])(?![A-Za-z0-9])',
+      caseSensitive: false,
+    ),
+    (m) => '${m.group(1)}Q${m.group(2)}: ${m.group(3)}',
+  );
+}
+
 /// Parses key entries out of one key section's text (lines joined into
 /// a single token stream). Returns number → raw answer token; the first
 /// entry wins when a number is repeated (e.g. a key printed twice).
@@ -477,6 +557,9 @@ bool _startsQuestionWithOptions(List<String> lines, int i) {
 /// lookahead.
 Map<int, String> parseKeyEntries(String blob) {
   blob = stripBoldMarkers(blob);
+  // "Q1 C" (no separator) is a key entry too — rewrite it first, so
+  // the entry regex below sees the separated form.
+  blob = _normaliseBareQEntries(blob);
   final entries = <int, String>{};
   final starts = _keyEntryStartRe.allMatches(blob).toList();
   for (var i = 0; i < starts.length; i++) {
@@ -515,6 +598,7 @@ SegmentedText segmentText(List<String> lines) {
 SegmentedText segmentLines(List<SegmentedLine> lines) {
   final questionLines = <SegmentedLine>[];
   final keyEntries = <String, Map<int, String>>{};
+  final explicitKeyPapers = <String>{};
   var keySectionsFound = 0;
   var noiseLinesFiltered = 0;
   var currentPaper = defaultPaperLabel;
@@ -527,6 +611,17 @@ SegmentedText segmentLines(List<SegmentedLine> lines) {
   // ("1. C") can never move it.
   var lastQuestionPaper = currentPaper;
   var inKey = false;
+  // Inside an "Explanation:" / "Associated Information:" block — its
+  // lines are dropped from questionLines (see below).
+  var inExplanation = false;
+  // True once an option line has been seen since the last question
+  // start — i.e. a COMPLETE question precedes the current line. An
+  // "Explanation:" heading only opens the drop when this is true: a
+  // bare "explanation:" line can also be part of a question stem
+  // (PPSC-66 Q23: "Select one word that best matches the given" /
+  // "explanation:" — an OCR line-break inside the stem), and
+  // swallowing it would delete the whole question.
+  var questionHasOptions = false;
   var keyPaper = currentPaper;
   final keyBuffer = <String>[];
 
@@ -556,9 +651,15 @@ SegmentedText segmentLines(List<SegmentedLine> lines) {
     if (isAnswerKeyHeading(line)) {
       flushKey();
       inKey = true;
+      inExplanation = false;
       // Explicit paper reference wins; otherwise the paper whose
       // questions precede the key; otherwise the current heading.
-      keyPaper = _paperRefIn(line) ?? lastQuestionPaper;
+      final explicitPaper = _paperRefIn(line);
+      keyPaper = explicitPaper ?? lastQuestionPaper;
+      // Strict paper rule (owner, 20 Nov 2026): a heading that NAMES
+      // a paper makes that paper explicit — its entries apply only to
+      // it, never to another paper.
+      if (explicitPaper != null) explicitKeyPapers.add(explicitPaper);
       keySectionsFound++;
       keyEntries.putIfAbsent(keyPaper, () => <int, String>{});
       continue;
@@ -567,6 +668,7 @@ SegmentedText segmentLines(List<SegmentedLine> lines) {
     if (paperLabel != null) {
       flushKey();
       inKey = false;
+      inExplanation = false;
       currentPaper = paperLabel;
       continue;
     }
@@ -580,6 +682,7 @@ SegmentedText segmentLines(List<SegmentedLine> lines) {
         !line.trim().endsWith('?')) {
       flushKey();
       inKey = false;
+      inExplanation = false;
       currentPaper = monthLabel;
       continue;
     }
@@ -603,9 +706,34 @@ SegmentedText segmentLines(List<SegmentedLine> lines) {
       keyBuffer.add(line);
       continue;
     }
+    // Explanation / "Associated Information" blocks (PPSC-66 Paper
+    // 67, 20 Nov 2026): prose + bullets explaining the PREVIOUS
+    // question's answer — never questions. Dropped from questionLines,
+    // so a bullet ("- Conquests:") can never become a q-only
+    // flashcard and a year-led prose line ("1258. This was …") can
+    // never split a block. The block ends at the next real question
+    // (a question start with options following) or at a heading
+    // (handled above). A numberless stem after an explanation is
+    // swallowed by this rule — accepted limitation: in this book the
+    // questions after explanations are numbered.
+    if (inExplanation) {
+      if (_startsQuestionWithOptions(texts, i)) {
+        inExplanation = false;
+        // Fall through: this line is a question line.
+      } else {
+        continue;
+      }
+    }
+    if (_explanationHeadingRe.hasMatch(line.trim()) &&
+        questionHasOptions) {
+      inExplanation = true;
+      continue;
+    }
     if (_questionStartRe.hasMatch(line)) {
       lastQuestionPaper = currentPaper;
+      questionHasOptions = false;
     }
+    if (_optionLineRe.hasMatch(line)) questionHasOptions = true;
     questionLines.add(
       SegmentedLine(
         line,
@@ -622,5 +750,364 @@ SegmentedText segmentLines(List<SegmentedLine> lines) {
     keyEntries: keyEntries,
     keySectionsFound: keySectionsFound,
     noiseLinesFiltered: noiseLinesFiltered,
+    explicitKeyPapers: explicitKeyPapers,
+  );
+}
+
+/// Resolves an answer token to an option index: a letter (C), a number
+/// (3), the option's own text ("Islamabad"), or a letter plus the text
+/// ("B) Asif Ali Zardari" — the letter wins, the text is the fallback).
+/// A letter in parens ("(C) 80", "(C)80" — the OCR-noisy Final Answer
+/// form, no space after the paren) resolves by letter; the trailing
+/// value is a cross-check for the caller (see
+/// [resolveAnswerToken] is also the resolver for a separately
+/// attached answer key (see [applyAttachedKey]).
+int? resolveAnswerToken(String token, List<String> options) {
+  final t = token.trim();
+  // "Option C" (Examveda "Answer: Option X"): the word "Option" + a
+  // letter. Resolve by the letter. A–E (not just A–D): a 5-option
+  // question's answer can be E — the single-letter bounds check
+  // below rejects E for a 4-option question.
+  final optionLetter = RegExp(
+    r'^option\s+([A-Ea-e1-5])\b',
+    caseSensitive: false,
+  ).firstMatch(t);
+  if (optionLetter != null) {
+    return resolveAnswerToken(optionLetter.group(1)!, options);
+  }
+  // "(C) 80" / "(C)80": letter in parens, then an optional value.
+  // The paren makes it unambiguous (not a decimal like "3.14"), so
+  // the space after the paren is optional — OCR drops it.
+  final parenLetter = RegExp(
+    r'^[\(\[]\s*([A-Ea-e1-5])\s*[\)\]]\s*(.*)$',
+  ).firstMatch(t);
+  if (parenLetter != null) {
+    final byLetter = resolveAnswerToken(parenLetter.group(1)!, options);
+    if (byLetter != null) return byLetter;
+    final rest = parenLetter.group(2)!;
+    if (rest.isNotEmpty) return resolveAnswerToken(rest, options);
+    return null;
+  }
+  final stripped = t.replaceAll(RegExp(r'^[\(\[]|[\)\]]$'), '');
+  // "B) Asif Ali Zardari" / "2. Paris": letter-or-number, then text.
+  // A–E: a 5-option question's answer can be E.
+  final letterText = RegExp(
+    r'^\(?([A-Ea-e1-5])[\)\.\:\-]\s+(.+)$',
+  ).firstMatch(stripped);
+  if (letterText != null) {
+    final byLetter = resolveAnswerToken(letterText.group(1)!, options);
+    if (byLetter != null) return byLetter;
+    return resolveAnswerToken(letterText.group(2)!, options);
+  }
+  final asNum = int.tryParse(stripped);
+  if (asNum != null && asNum >= 1 && asNum <= options.length) {
+    return asNum - 1;
+  }
+  if (stripped.length == 1) {
+    final c = stripped.toUpperCase().codeUnitAt(0);
+    if (c >= 65 && c < 65 + options.length) return c - 65;
+  }
+  final lower = stripped.toLowerCase();
+  for (var i = 0; i < options.length; i++) {
+    if (options[i].trim().toLowerCase() == lower) return i;
+  }
+  return null;
+}
+
+
+/// Outcome of applying a separately attached answer key to the
+/// pending (unanswered) questions of one import (20 Nov 2026,
+/// owner's flow: "Jawab wali key attach karein"). The key is matched
+/// by question NUMBER only, never by position — and never guessed:
+/// a number with no key entry, a "?" token, or a token that matches
+/// no option stays pending.
+class KeyAttachResult {
+  const KeyAttachResult({
+    required this.filled,
+    required this.stillMissingNumbers,
+    required this.unnumberedStillMissing,
+    required this.unresolvedNumbers,
+    required this.orphanKeyPapers,
+    this.parseFailed = false,
+  });
+
+  /// Pending-list index → resolved option index (0–3).
+  final Map<int, int> filled;
+
+  /// Book numbers still without a usable answer (no key entry, a
+  /// "?" token, or an unresolvable token), sorted ascending.
+  final List<int> stillMissingNumbers;
+
+  /// Pending questions with no book number at all — a key can never
+  /// match them by number, so they stay pending whatever the key says.
+  final int unnumberedStillMissing;
+
+  /// Book numbers whose key entry exists but matched NO option
+  /// (e.g. the key says "E" for a 4-option question, or a text
+  /// answer that is none of the options). A subset of
+  /// [stillMissingNumbers].
+  final List<int> unresolvedNumbers;
+
+  /// Papers the attached key NAMED ("Answers – Paper 60") that have
+  /// no pending questions in this import — their entries were applied
+  /// to nothing, per the strict paper rule.
+  final List<String> orphanKeyPapers;
+
+  /// True when the key text contained ZERO parseable entries — the
+  /// caller must say so plainly and guess nothing.
+  final bool parseFailed;
+}
+
+/// Applies a separately attached answer key ([keyText] — typed/pasted
+/// text, or the text read from an attached key photo/PDF) to [pending].
+///
+/// The key text is segmented exactly like book text ([segmentText]),
+/// so a heading that names a paper ("Answers – Paper 60") scopes its
+/// entries to that paper ONLY (strict paper rule, owner 20 Nov 2026:
+/// one paper's key never answers another paper's questions). Entries
+/// under NO named paper (a bare key — "1-C 2-B …" with no heading)
+/// apply to every pending question by number. A pending question
+/// first looks in its own paper's entries, then in the bare entries.
+///
+/// A "?" token means the key itself says the answer is unknown — the
+/// question stays pending, never guessed. An entry that resolves to no
+/// option is reported in [KeyAttachResult.unresolvedNumbers], never
+/// force-matched. Returns [KeyAttachResult.parseFailed] when the key
+/// text has no parseable entries at all.
+KeyAttachResult applyAttachedKey({
+  required String keyText,
+  required List<PendingQuestion> pending,
+}) {
+  final lines = keyText
+      .split('\n')
+      .map((l) => l.trim())
+      .where((l) => l.isNotEmpty)
+      // A bare paper-title line ("MODEL PAPER 66") is furniture in a
+      // standalone key: left in, it would close the key section and
+      // strand the entries after it. Paper identity for scoping comes
+      // from a KEY heading ("Answers – Paper 60"), never from a bare
+      // title line.
+      .where((l) => !_paperHeadingRe.hasMatch(l))
+      .toList();
+  // A key with no heading of its own ("1-C 2-B", "1. Islamabad") has
+  // no key section to land in: a text answer would read as a question
+  // line and be lost. Open a synthetic section so every entry routes
+  // into the key buffer; it names no paper, so its entries stay bare
+  // (apply to any pending question by number).
+  if (!lines.any(isAnswerKeyHeading)) {
+    lines.insert(0, 'ANSWER KEY');
+  }
+  final seg = segmentText(lines);
+  final explicit = seg.explicitKeyPapers;
+  // Bare (unscoped) entries: every paper the key did NOT name
+  // explicitly. In key-only text with no question lines, a bare
+  // heading lands its entries under [defaultPaperLabel]; a named
+  // heading lands them under its paper.
+  final bareEntries = <int, String>{};
+  var totalEntries = 0;
+  for (final e in seg.keyEntries.entries) {
+    totalEntries += e.value.length;
+    if (!explicit.contains(e.key)) {
+      for (final entry in e.value.entries) {
+        bareEntries.putIfAbsent(entry.key, () => entry.value);
+      }
+    }
+  }
+  // Papers the key named that have no pending questions at all.
+  final pendingPapers = {for (final p in pending) p.paper};
+  final orphanKeyPapers = explicit
+      .where((paper) => !pendingPapers.contains(paper))
+      .toList()
+    ..sort();
+  final filled = <int, int>{};
+  final stillMissing = <int>[];
+  final unresolved = <int>[];
+  var unnumberedStillMissing = 0;
+  for (var i = 0; i < pending.length; i++) {
+    final p = pending[i];
+    final number = p.number;
+    if (number == null) {
+      unnumberedStillMissing++;
+      continue;
+    }
+    // Own paper first, then the bare entries.
+    final ownEntries = seg.keyEntries[p.paper];
+    final token = ownEntries?[number] ?? bareEntries[number];
+    if (token == null || isUnknownKeyToken(token)) {
+      stillMissing.add(number);
+      continue;
+    }
+    final correct = resolveAnswerToken(token, p.options);
+    if (correct == null) {
+      stillMissing.add(number);
+      unresolved.add(number);
+      continue;
+    }
+    filled[i] = correct;
+  }
+  stillMissing.sort();
+  unresolved.sort();
+  return KeyAttachResult(
+    filled: filled,
+    stillMissingNumbers: stillMissing,
+    unnumberedStillMissing: unnumberedStillMissing,
+    unresolvedNumbers: unresolved,
+    orphanKeyPapers: orphanKeyPapers,
+    parseFailed: totalEntries == 0,
+  );
+}
+
+/// --- MASTER DIRECTIVE Part 8 wiring (20 Nov 2026) ---
+///
+/// Per-key-paper match decisions for one segmented import: for every
+/// paper label that has key entries, [decideKeyMatch] over the key's
+/// identity against the questions' identity, with position + coverage
+/// evidence from the segmentation. The parser's key join must go
+/// through this map:
+/// * VERIFIED → auto-assigns silently (the key names its paper and
+///   the questions are that paper's).
+/// * HIGH CONFIDENCE → the parser applies it, but flags it in
+///   keyPaperReport: the upload preview shows the flag and the
+///   user's Save is the confirmation. The parser runs BEFORE the
+///   preview, so the preview + Save is the only existing user
+///   confirmation path for an in-book key — there is no per-key
+///   confirm dialog to wait on. Withholding HIGH would also break
+///   the normal case (a bare key at the end of a single-paper book,
+///   and the Pace book's per-month bare keys — both pinned by
+///   existing tests), which is not a fix.
+/// * NEEDS REVIEW / UNVERIFIED / MISMATCH → never applied; the
+///   parser withholds the entries and reports the decision reason
+///   in keyPaperReport instead.
+///
+/// Identity facts (never numbers alone, never nearest-key):
+/// * An EXPLICIT key (its heading named a paper) carries that
+///   paper's number + title. A BARE key carries NO identity — its
+///   paper attribution (the preceding paper) is position evidence,
+///   never identity.
+/// * The question paper's identity comes from the paper label
+///   ("Paper 66" → number 66 + title "Paper 66"; "January 2026" →
+///   title only; the default "Paper 1" → number 1).
+/// * [paperCountInDocument] counts PAPER-kind labels only
+///   (Paper/Test/Set/Part/Section) — a month label is a section
+///   within one paper, not a paper of its own, so a book grouped by
+///   month is still one paper and its per-month bare keys stay HIGH
+///   CONFIDENCE instead of NEEDS REVIEW.
+/// * Coverage: at least one key entry number appears among the
+///   question-line numbers of that paper. Corroboration, never
+///   proof — coverage alone never verifies (see [decideKeyMatch]).
+///   Clipped numbers (PPSC-66 Q1/Q3–Q9) only weaken coverage; an
+///   explicit key is VERIFIED by number + title regardless.
+/// * Exclusive coverage: no key entry number appears in any OTHER
+///   segment's question numbers. This is the discriminator for a
+///   bare key in a multi-paper document — entry 61 matching only
+///   Paper 1 (Paper 2 has Q1) is exclusive, entry 1 matching both
+///   papers is not. All other segments count, not just paper-kind
+///   labels: the gate is deliberately conservative, since a wrong
+///   HIGH costs a mis-answered paper while a NEEDS REVIEW costs
+///   only one explicit key-attach tap. (A month-grouped book is
+///   unaffected — it is one paper, so the single-paper branch
+///   applies before exclusivity is ever consulted.)
+Map<String, KeyMatchDecision> keyMatchDecisions(
+  SegmentedText segmented, {
+  required String sourceDocumentId,
+}) {
+  final decisions = <String, KeyMatchDecision>{};
+  if (segmented.keyEntries.isEmpty) return decisions;
+
+  // Question-line numbers per paper label, for coverage evidence.
+  final questionNumbersByPaper = <String, Set<int>>{};
+  for (final l in segmented.questionLines) {
+    final n = _questionLineNumber(l.text);
+    if (n != null) {
+      questionNumbersByPaper.putIfAbsent(l.paper, () => <int>{}).add(n);
+    }
+  }
+
+  // Paper-kind labels present in the document (question lines +
+  // key labels). No paper-kind label at all means the whole book is
+  // one paper (e.g. grouped by month only).
+  final paperKindLabels = <String>{
+    for (final l in segmented.questionLines)
+      if (_isPaperKindLabel(l.paper)) l.paper,
+    for (final k in segmented.keyEntries.keys)
+      if (_isPaperKindLabel(k)) k,
+  };
+  final paperCount = paperKindLabels.isEmpty ? 1 : paperKindLabels.length;
+
+  for (final entry in segmented.keyEntries.entries) {
+    final label = entry.key;
+    final explicit = segmented.explicitKeyPapers.contains(label);
+    // Explicit: the key heading named this paper. Bare: no identity
+    // — the attribution is positional only.
+    final keyPaper = explicit
+        ? _paperIdentityForLabel(label, sourceDocumentId)
+        : PaperIdentity(sourceDocumentId: sourceDocumentId);
+    final questionPaper = _paperIdentityForLabel(label, sourceDocumentId);
+    final keyNumbers = entry.value.keys.toSet();
+    final questionNumbers = questionNumbersByPaper[label] ?? const <int>{};
+    final hasCoverage = keyNumbers.any(questionNumbers.contains);
+    // Exclusive coverage: no key entry number appears in any other
+    // segment's question numbers. An entry matching nothing at all
+    // (an orphan, e.g. from a clipped number) does not break
+    // exclusivity — it is reported as unmatched by the join, not
+    // evidence for another paper.
+    final otherNumbers = <int>{
+      for (final e in questionNumbersByPaper.entries)
+        if (e.key != label) ...e.value,
+    };
+    final hasExclusiveCoverage = hasCoverage &&
+        keyNumbers.every((n) => !otherNumbers.contains(n));
+    decisions[label] = decideKeyMatch(
+      keyPaper: keyPaper,
+      questionPaper: questionPaper,
+      paperCountInDocument: paperCount,
+      hasPositionEvidence: !explicit,
+      hasCoverageEvidence: hasCoverage,
+      hasExclusiveCoverageEvidence: hasExclusiveCoverage,
+    );
+  }
+  return decisions;
+}
+
+/// Question number of a question-start line ("Q12. …" → 12,
+/// "12) …" → 12), or null. Coverage evidence only — a numeric option
+/// line ("3. 42") can match too, which is acceptable noise for a
+/// corroborating signal (it can only add an overlap, never prove a
+/// match on its own).
+int? _questionLineNumber(String line) {
+  final m = RegExp(
+    r'^\s*(?:Q\s*\.?\s*)?(\d+)\s*[\.\)\:]',
+    caseSensitive: false,
+  ).firstMatch(line.trim());
+  if (m == null) return null;
+  return int.tryParse(m.group(1)!);
+}
+
+/// True when [label] is a paper-kind segment ("Paper 66", "Test 2",
+/// "Set A", "Part 1", "Section 3", the default "Paper 1") as opposed
+/// to a month segment ("January 2026"), which is a section within one
+/// paper, not a paper of its own.
+bool _isPaperKindLabel(String label) {
+  return RegExp(
+    r'^(paper|test|set|part|section)\s+\S+$',
+    caseSensitive: false,
+  ).hasMatch(label.trim());
+}
+
+/// Identity of the paper a segment label names: "Paper 66" → number
+/// 66 + title "Paper 66"; "January 2026" → title only; anything else
+/// → title only (never guessed).
+PaperIdentity _paperIdentityForLabel(
+  String label,
+  String sourceDocumentId,
+) {
+  final m = RegExp(
+    r'^(paper|test|set|part|section)\s+([0-9]+|[A-Z])$',
+    caseSensitive: false,
+  ).firstMatch(label.trim());
+  return PaperIdentity(
+    sourceDocumentId: sourceDocumentId,
+    paperNumber: m?.group(2),
+    paperTitle: label,
   );
 }

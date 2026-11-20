@@ -157,8 +157,13 @@ class _TestScreenState extends State<TestScreen> {
     // screen. The result is shown even if the save fails (Result
     // shows a "could not be saved" banner); _submitted is reset so a
     // retry is possible if navigation itself fails.
+    // No-answers mode (20 Nov 2026): a test whose questions ALL lack
+    // answers has no result at all — there is nothing honest to
+    // record in History (a 0% FAIL would be a lie), and no score to
+    // sync to the server. Mixed tests save normally (scored counts
+    // only); the Result screen states how many were unscored.
     var saveFailed = false;
-    if (!widget.isRetry) {
+    if (!widget.isRetry && !result.allUnscored) {
       try {
         final record = result.toRecord(
           examId: widget.exam.id,
@@ -450,6 +455,29 @@ class _TestScreenState extends State<TestScreen> {
                 ),
               ),
             ),
+            // No-answers mode (20 Nov 2026): say so plainly while the
+            // user is still answering — these questions can never be
+            // marked right or wrong, so no result can be shown for them.
+            if (widget.questions.any((q) => !q.hasAnswer))
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  vertical: 6,
+                  horizontal: 8,
+                ),
+                color: Theme.of(
+                  context,
+                ).colorScheme.errorContainer,
+                child: Text(
+                  '${widget.questions.where((q) => !q.hasAnswer).length} '
+                  'question(s) ke jawab nahi hain — un ka score nahi '
+                  'hoga (na sahi, na ghalat), aur un ka result nahi '
+                  'dikhega.',
+                  textAlign: TextAlign.center,
+                  softWrap: true,
+                  style: const TextStyle(fontSize: 13),
+                ),
+              ),
             Expanded(
               child: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 250),

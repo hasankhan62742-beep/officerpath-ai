@@ -1,10 +1,13 @@
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:officerpath_ai/screens/upgrade_screen.dart';
+import 'package:officerpath_ai/services/payment_proof_service.dart';
+import 'package:officerpath_ai/services/secure_key_store.dart';
 import 'package:officerpath_ai/services/subscription_service.dart';
 import 'package:officerpath_ai/theme/app_theme.dart';
 import 'package:officerpath_ai/widgets/developer_credit_footer.dart';
@@ -12,7 +15,9 @@ import 'package:officerpath_ai/widgets/upgrade_button.dart';
 
 /// v1.2 — Upgrade button (red, top corner) + manual payment screen.
 ///
-/// The Upgrade screen itself is pumpable (SharedPreferences only).
+/// The Upgrade screen itself is pumpable (SharedPreferences mock for
+/// the free-test counter + in-memory secure store for the premium
+/// cache).
 /// Home / My Books / History / Current Affairs / Setup need sqflite,
 /// so they are covered by a source check (the shared button widget is
 /// imported and placed in the AppBar) while the button itself is
@@ -50,6 +55,10 @@ void main() {
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     await SubscriptionService.instance.resetForTest();
+    // Premium cache lives in secure storage — inject the in-memory
+    // fake (see subscription_test.dart).
+    SubscriptionService.instance.secureStoreOverride =
+        InMemorySecureStore();
   });
 
   group('UpgradeAppBarButton', () {
@@ -394,4 +403,191 @@ void main() {
       expect(source, contains('DeveloperCreditFooter'));
     });
   });
+
+  group('receiptWhatsAppUri (pure)', () {
+    test('builds the wa.me link with plan, TID and email', () {
+      final uri = receiptWhatsAppUri(
+        plan: PremiumPlan.byId('premium_2months'),
+        method: 'JazzCash',
+        transactionId: '03060853742111',
+        email: 'student@example.com',
+      );
+      expect(uri.scheme, 'https');
+      expect(uri.host, 'wa.me');
+      expect(uri.path, '/923427717288');
+      final text = uri.queryParameters['text'] ?? '';
+      expect(text, contains('2 Months'));
+      expect(text, contains('JazzCash'));
+      expect(text, contains('03060853742111'));
+      expect(text, contains('student@example.com'));
+    });
+
+    test('empty TID falls back to the screenshot note, never blank', () {
+      final uri = receiptWhatsAppUri(
+        plan: PremiumPlan.byId('premium_1month'),
+        method: 'Easypaisa',
+        transactionId: '',
+        email: null,
+      );
+      final text = uri.queryParameters['text'] ?? '';
+      expect(text, contains('(screenshot attached)'));
+      expect(text, contains('(not signed in)'));
+    });
+  });
+
+  group('UpgradeScreen — receipt screenshot + WhatsApp', () {
+    Future<void> pumpWithProofService(
+      WidgetTester tester,
+      PaymentProofService service,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light,
+          darkTheme: AppTheme.dark,
+          home: UpgradeScreen(paymentProofService: service),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    PaymentProofService fakeProofService() => PaymentProofService(
+      accountProvider: () => (id: 'user-1', email: 'student@example.com'),
+      inserter:
+          (row) async => {
+            ...row,
+            'id': 'pay-1',
+            'created_at': '2026-11-19T10:00:00Z',
+          },
+      fetcher: (_) async => [],
+      uploader:
+          ({required userId, required fileName, required bytes}) async =>
+              'user-1/receipt.jpg',
+      isConfigured: () => true,
+    );
+
+    // A plain final (not a getter): getters cannot be declared inside
+    // a group() callback — `Finder get tidField` never compiled.
+    final Finder tidField = find.byWidgetPredicate(
+      (w) => w is TextField && w.decoration?.labelText == 'Transaction ID',
+    );
+
+    Future<void> scrollToStep2(WidgetTester tester) async {
+      await tester.scrollUntilVisible(
+        find.text('Step 2 — Submit your payment proof'),
+        500,
+        scrollable: _listScrollable,
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('attach button + required instruction are visible', (
+      tester,
+    ) async {
+      _setSmallPhone(tester);
+      await _pumpUpgradeScreen(tester);
+      await scrollToStep2(tester);
+      expect(
+        find.text('Attach receipt screenshot (required)'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining(
+          'attach the receipt screenshot below AND send it on WhatsApp',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Send receipt screenshot on WhatsApp'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('submit without a receipt shows the screenshot error', (
+      tester,
+    ) async {
+      _setSmallPhone(tester);
+      await pumpWithProofService(tester, fakeProofService());
+      await scrollToStep2(tester);
+      await tester.enterText(tidField, '1234567890');
+      await tester.scrollUntilVisible(
+        find.text('Submit proof'),
+        500,
+        scrollable: _listScrollable,
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Submit proof'));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('Please attach your payment receipt screenshot'),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('pick receipt, submit, WhatsApp next step is shown', (
+      tester,
+    ) async {
+      _setSmallPhone(tester);
+      // The fake picker carries the receipt bytes directly (no temp
+      // file): async dart:io (Directory.createTemp) HANGS inside
+      // widget tests on this VM — proven by a minimal repro
+      // (usc_minimal_test.dart): plain Dart creates the temp dir in
+      // 9ms, but the widget-test binding never delivers the async
+      // completion, so the test stalls forever. The screen's
+      // _receiptBytes() prefers f.bytes when present.
+      FilePicker.platform = _FakeReceiptPicker(
+        PlatformFile(
+          name: 'receipt.jpg',
+          bytes: Uint8List.fromList([1, 2, 3]),
+          size: 3,
+        ),
+      );
+      await pumpWithProofService(tester, fakeProofService());
+      await scrollToStep2(tester);
+      await tester.tap(find.text('Attach receipt screenshot (required)'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Receipt: receipt.jpg'), findsOneWidget);
+      await tester.enterText(tidField, '1234567890');
+      await tester.scrollUntilVisible(
+        find.text('Submit proof'),
+        500,
+        scrollable: _listScrollable,
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Submit proof'));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining(
+          'send your payment receipt screenshot on WhatsApp',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Send receipt screenshot on WhatsApp'),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    });
+  });
+}
+
+/// Fake file picker for widget tests: returns one canned receipt file.
+/// Extends (not implements) FilePicker so the platform-interface token
+/// check passes.
+class _FakeReceiptPicker extends FilePicker {
+  _FakeReceiptPicker(this.file);
+
+  final PlatformFile file;
+
+  @override
+  Future<FilePickerResult?> pickFiles({
+    String? dialogTitle,
+    String? initialDirectory,
+    FileType type = FileType.any,
+    List<String>? allowedExtensions,
+    Function(FilePickerStatus)? onFileLoading,
+    bool allowCompression = true,
+    int compressionQuality = 30,
+    bool allowMultiple = false,
+    bool withData = false,
+    bool withReadStream = false,
+    bool lockParentWindow = false,
+    bool readSequential = false,
+  }) async => FilePickerResult([file]);
 }

@@ -38,6 +38,7 @@ class BookPart {
     required this.startPage,
     required this.endPage,
     required this.questionCount,
+    this.pendingCount = 0,
   });
 
   /// e.g. "Pakistan Current Affairs", "Paper 1", "Poori book".
@@ -54,17 +55,25 @@ class BookPart {
   /// pipeline overwrites it with the exact parsed count.
   final int questionCount;
 
+  /// Answer-pending questions in this part (parsed, but no usable
+  /// answer yet). A part with only pending questions still appears in
+  /// the parts list (PPSC-66 §5.5, 20 Nov 2026) — its questions exist,
+  /// they just cannot be tested until an answer is attached.
+  final int pendingCount;
+
   BookPart copyWith({
     String? title,
     int? startPage,
     int? endPage,
     int? questionCount,
+    int? pendingCount,
   }) {
     return BookPart(
       title: title ?? this.title,
       startPage: startPage ?? this.startPage,
       endPage: endPage ?? this.endPage,
       questionCount: questionCount ?? this.questionCount,
+      pendingCount: pendingCount ?? this.pendingCount,
     );
   }
 
@@ -73,6 +82,7 @@ class BookPart {
     'startPage': startPage,
     'endPage': endPage,
     'questionCount': questionCount,
+    'pendingCount': pendingCount,
   };
 
   factory BookPart.fromMap(Map<String, dynamic> map) => BookPart(
@@ -80,6 +90,7 @@ class BookPart {
     startPage: map['startPage'] as int? ?? 1,
     endPage: map['endPage'] as int? ?? (map['startPage'] as int? ?? 1),
     questionCount: map['questionCount'] as int? ?? 0,
+    pendingCount: map['pendingCount'] as int? ?? 0,
   );
 }
 
@@ -159,8 +170,11 @@ bool _looksLikeHeaderLine(String line) {
   final lower = t.toLowerCase();
   if (monthHeadingLabel(t) != null) return true;
   if (lower.startsWith('current affairs') && !t.endsWith('?')) return true;
-  if (lower.startsWith('year 2026')) return true;
-  if (lower.startsWith('papers of 2026')) return true;
+  // Any year, not just 2026: the PPSC-66 book runs "Papers of 2021"
+  // and "Year 2021" headers, and the old hardcoded 2026 let them
+  // through as part titles (baseline §5.5).
+  if (RegExp(r'^year\s+(19|20)\d\d').hasMatch(lower)) return true;
+  if (RegExp(r'^papers of\s+(19|20)\d\d').hasMatch(lower)) return true;
   return false;
 }
 
@@ -410,6 +424,28 @@ bool _isExcludedLine(String text, Set<String> repeats) {
   if (finalAnswerRe.hasMatch(text)) return true;
   if (noteContent(text) != null) return true;
   if (monthHeadingLabel(text) != null) return false;
+  // A running header/footer is never a part title (PPSC-66 baseline
+  // §5.5: "Papers of 2021 521", "524 Advanced FPJC MCQs Model Papers
+  // (Volume 2)" and bare "522" all became part titles). Years are
+  // any year, not just 2026. A heading never starts with a bare page
+  // number — a real heading starting with a year ("2021 Current
+  // Affairs") is untouched because a year (1900–2099) is not a page
+  // number, and a question start ("524. …") carries punctuation
+  // after the number, not a space.
+  if (RegExp(r'^papers of\s+(19|20)\d\d\b', caseSensitive: false)
+      .hasMatch(text)) {
+    return true;
+  }
+  if (RegExp(r'^year\s+(19|20)\d\d\b', caseSensitive: false)
+      .hasMatch(text)) {
+    return true;
+  }
+  if (RegExp(r'^\d{1,4}$').hasMatch(text)) return true;
+  final pagePrefix = RegExp(r'^(\d{1,4})\s+[A-Z]').firstMatch(text);
+  if (pagePrefix != null) {
+    final n = int.tryParse(pagePrefix.group(1)!);
+    if (n != null && (n < 1900 || n > 2099)) return true;
+  }
   if (repeats.contains(_repeatKey(text))) return true;
   return false;
 }

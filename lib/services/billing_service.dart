@@ -4,7 +4,7 @@ import 'subscription_service.dart';
 ///
 /// v1 distribution is a DIRECT APK (sideload) with NO Play account, and
 /// v1 payment is MANUAL (JazzCash / Easypaisa / bank transfer + owner
-/// activation code — see manual_activation.dart). This service ships NO
+/// activation code — server-issued single-use code, see issue-code). This service ships NO
 /// billing dependency and takes NO money. It always reports "not wired
 /// yet" and never grants Premium, so a v1 build can never accidentally
 /// sell something.
@@ -22,7 +22,8 @@ import 'subscription_service.dart';
 ///    details, launch the subscription purchase flow, listen to the
 ///    purchase stream, verify the purchase (server-side verification via
 ///    Google Play Developer API / RTDN is the production-grade route),
-///    and ONLY then call `SubscriptionService.instance.grantPremium(plan)`.
+///    and ONLY then grant Premium through the server-verified path
+///    (`SubscriptionService.instance.applyServerPremium(plan, until)`).
 /// 4. Handle restores (user reinstalls / new phone) by re-querying owned
 ///    purchases on app start and re-granting while the subscription is active.
 /// 5. Test with Play Console license testers on the Internal Testing track

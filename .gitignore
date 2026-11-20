@@ -28,3 +28,9 @@ Thumbs.db
 *.jks
 key.properties
 .env
+
+# Real user emails (waitlist/access requesters) — never commit.
+# SECURITY AUDIT 2026-11-20 (M5): this file holds 11 real requester
+# emails; it was excluded from pushes only by the push helper's
+# EXTRA_EXCLUDES until now.
+access-requests-seen.txt

@@ -562,7 +562,7 @@ Answer: B
       expect(maps['skipped'], 0);
     });
 
-    test('F2 June 2025: 0 parsed, 25 answer-pending for AI inference',
+    test('F2 June 2025: 0 parsed, 28 answer-pending for AI inference',
         () async {
       final file = File(
         '/home/hatch/workspace/user/files/Current-Affairs-June-2025-in-PDF__1.pdf',
@@ -575,10 +575,18 @@ Answer: B
         'sourceLabel': 'June 2025',
       });
       expect(maps['parsed'], 0);
-      expect((maps['answerPending'] as List).length, 25);
+      // 20 Nov 2026 (was 25): the U+E000 fix in _splitQuestionAndRest
+      // recovered the 10 two-line '?' stems whose questionText had
+      // "Mcqsplanet.com" appended (the raw tail ends "?<U+E000>", so
+      // the raw endsWith('?') test failed and the junk line was
+      // swallowed into the stem, failing the pending gate); the
+      // numberless split recovered 3 more. 28 = all 30 items minus
+      // the 2 with no '?' stem (Sindh "is:", crypto) — verified by
+      // reading the 28 pending texts (full stems, 2 known fragments).
+      expect((maps['answerPending'] as List).length, 28);
     });
 
-    test('F3 Pak Affairs prose: 181 MCQs (162 flashcard + 19 table)',
+    test('F3 Pak Affairs prose: 186 MCQs (159 flashcard + 27 table)',
         () async {
       final file = File(
         '/home/hatch/workspace/user/files/Pak_Affairs_by_CSPs.pdf',
@@ -592,9 +600,15 @@ Answer: B
       });
       // v1.2 audit said 162 (q-only only). v1.3 (measured 19 Nov 2026)
       // finds 19 more bold-resolved table rows on top: 162 + 19.
-      expect(maps['parsed'], 181);
-      expect(maps['formats']['q-only'], 162);
-      expect(maps['formats']['table'], 19);
+      // 20 Nov 2026 (was 181 = 162 + 19): the table fixes (Sr.#/Ans
+      // headers, "A." marker strip, in-table heading/label handling)
+      // recover 8 more real table rows (27), and 3 q-only items move
+      // to the table pass — 159 + 27 = 186. Verified by reading the
+      // 27 table rows (real book content; repeats are the book's own
+      // repeated sections, counted the same way as the old 181).
+      expect(maps['parsed'], 186);
+      expect(maps['formats']['q-only'], 159);
+      expect(maps['formats']['table'], 27);
     });
 
     test('F6 Pace two-column: 1442 parsed', () async {
@@ -638,7 +652,7 @@ Answer: B
       expect((maps['parts'] as List).length, 9);
     });
 
-    test('MPT: 142 parsed, "?" questions excluded', () async {
+    test('MPT: 143 parsed, "?" questions excluded', () async {
       final file = File(
         '/home/hatch/workspace/user/files/MPT-CSS-2027-Solved.pdf',
       );
@@ -649,7 +663,17 @@ Answer: B
         'sourceId': 'real-mpt',
         'sourceLabel': 'MPT',
       });
-      expect(maps['parsed'], 142);
+      // 20 Nov 2026 (was 142): the unfinished-question fix heals
+      // ~45 fragment stems into full stems (a long numbered stem
+      // >70 chars was judged "not a question", so its '?' tail split
+      // it away from its head — MPT Q116/Q177). 143 = 140 block (all
+      // with full stems + key answers; Q3/Q106 excluded by the book's
+      // own defect notes, Q198 lost to column interleave in the PDF
+      // text layer) + 3 loose-format q-only items (title / warning /
+      // header lines — same loose q-only behaviour as F3's headings,
+      // unverified). Skipped is back to 3 (was 48 mid-fix when the
+      // splits fragmented blocks into separate skipped halves).
+      expect(maps['parsed'], 143);
       expect(maps['skipped'], 3);
       final pages = extractPdfPages(bytes);
       final r = parseMcqsFromPages(
@@ -704,7 +728,7 @@ Answer: B
       expect(maps['parsed'], 467);
     });
 
-    test('Examveda 546pp: 3202 parsed, 1689 skipped', () async {
+    test('Examveda 546pp: 3212 parsed, 1688 skipped', () async {
       final file = File(
         '/home/hatch/workspace/user/files/Examveda_GK_Comp_Eng_Sir_Waleed_0300_1111938.pdf',
       );
@@ -729,8 +753,15 @@ Answer: B
       // book-correct: "The Mistral is" → D ("All", book's own
       // "Answer: Option D"), "20th August is celebrated as" → B
       // (Sadbhavana Divas, book's "Answer: Option B").
-      expect(maps['parsed'], 3202);
-      expect(maps['skipped'], 1689);
+      // 20 Nov 2026 (was 3202/1689): the numberless split + U+E000
+      // fix + E-option guard + unfinished-question fix recover 10
+      // more real questions (block 3177→3180, q-only 8→11, table
+      // 17→21; the 6 flashcard items are unchanged in kind). The
+      // E-option guard matters: without it the split cut 5-option
+      // questions apart after D and the orphaned "E. …" line became
+      // a fake q-only question (15+ fabrications, since removed).
+      expect(maps['parsed'], 3212);
+      expect(maps['skipped'], 1688);
     });
 
     test('organisation file: 0 MCQs, 180 facts (generation-only)',

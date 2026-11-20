@@ -1875,6 +1875,7 @@ Map<String, dynamic> processPdfInBackground(Map<String, dynamic> args) {
     'noiseLinesFiltered': parsed.noiseLinesFiltered,
     'facts': parsed.facts.map((f) => f.toMap()).toList(),
     'answerPending': parsed.answerPending.map((p) => p.toMap()).toList(),
+    'keyPaperReport': parsed.keyPaperReport,
   };
 }
 
@@ -1948,5 +1949,6 @@ Map<String, dynamic> parseTextInBackground(Map<String, dynamic> args) {
     'noiseLinesFiltered': parsed.noiseLinesFiltered,
     'facts': parsed.facts.map((f) => f.toMap()).toList(),
     'answerPending': parsed.answerPending.map((p) => p.toMap()).toList(),
+    'keyPaperReport': parsed.keyPaperReport,
   };
 }

@@ -6,8 +6,11 @@ import 'package:flutter/material.dart';
 
 import '../models/exam.dart';
 import '../models/question.dart';
+import '../services/answer_key.dart';
 import '../services/book_selection.dart';
 import '../services/docx_text_extractor.dart';
+import '../services/mcq_parser.dart';
+import '../services/parse_validation.dart';
 import '../services/pdf_import_service.dart';
 import '../services/pdf_text_extractor.dart';
 import '../services/storage_service.dart';
@@ -255,8 +258,9 @@ class _UploadScreenState extends State<UploadScreen> {
   Future<void> _importResult(
     PdfImportResult result,
     String title,
-    String sourceId,
-  ) async {
+    String sourceId, {
+    String? keyAttachMessage,
+  }) async {
     if (!mounted) return;
     if (result.parsed == 0) {
       await _showNoMcqsDialog(result, title, sourceId);
@@ -288,6 +292,25 @@ class _UploadScreenState extends State<UploadScreen> {
         working = _withQuestions(result, filtered);
       }
     }
+    // MASTER DIRECTIVE Part 10 (20 Nov 2026): validate the parse
+    // BEFORE the preview shows. Errors block saving (a duplicated
+    // question would corrupt a test); warnings/infos are shown as a
+    // note. Never repairs, never drops — only reports. Built from the
+    // working (post-selection) result, so a filtered-out problem
+    // cannot block saving the selected part.
+    final validation = validateParseResult(
+      ParseResult(
+        questions: working.questions,
+        parsed: working.parsed,
+        skipped: working.skipped,
+        answerPending: working.answerPending,
+        questionsMissingAnswers: working.questionsMissingAnswers,
+        numberDuplicates: working.numberDuplicates,
+        conflicts: working.conflicts,
+        unmatchedKeyEntries: working.unmatchedKeyEntries,
+        keyPaperReport: working.keyPaperReport,
+      ),
+    );
     // MPT fit (v1.2): an MPT-titled book suggests the CSS MPT pattern
     // (200 Q / 200 min) instead of the PPSC default.
     final mptSuggestion = ExamPattern.suggestForTitle(title);
@@ -388,6 +411,12 @@ class _UploadScreenState extends State<UploadScreen> {
         'AI se nahi nikale jate.',
       );
     }
+    // Key attribution (strict paper rule, 20 Nov 2026): which paper
+    // each in-PDF key attached to — and any key whose paper has no
+    // questions here (applied to nothing, said plainly).
+    if (working.keyPaperReport.isNotEmpty) {
+      lines.addAll(working.keyPaperReport.map((l) => '• $l'));
+    }
     if (working.skipped > 0) {
       lines.add(
         'Skipped ${working.skipped} block(s) (missing options/answer).',
@@ -430,12 +459,22 @@ class _UploadScreenState extends State<UploadScreen> {
         summaryLines: lines,
         showManual: working.answerPending.isNotEmpty,
         showMpt: mptSuggestion != null,
+        keyAttachMessage: keyAttachMessage,
+        validation: validation,
       ),
     );
     if (decision == null || decision.action == 'cancel') return;
     final corrected = _withQuestions(working, decision.questions);
     if (decision.action == 'manual') {
       await _runManualCorrection(corrected, title, sourceId);
+      return;
+    }
+    if (decision.action == 'save-answerless') {
+      await _saveAnswerless(corrected, title, sourceId);
+      return;
+    }
+    if (decision.action == 'key') {
+      await _runKeyAttach(corrected, title, sourceId);
       return;
     }
     if (decision.action == 'mpt') {
@@ -462,6 +501,56 @@ class _UploadScreenState extends State<UploadScreen> {
     await _load();
     if (mounted) {
       _showMessage('Saved ${corrected.parsed} MCQs from "$title".');
+    }
+  }
+
+  /// Saves the still-pending questions as ANSWERLESS questions
+  /// (correctIndex -1) together with the answered ones — the
+  /// "no-answers" mode (20 Nov 2026). Nothing is invented: the saved
+  /// rows carry no answer, the test never scores them, and the result
+  /// screen never shows a score for them. The user is told so in the
+  /// confirmation message. Used both from the extraction preview
+  /// ('save-answerless') and from the "No MCQs found" dialog (the
+  /// all-pending case, where there are no answered questions at all).
+  Future<void> _saveAnswerless(
+    PdfImportResult result,
+    String title,
+    String sourceId,
+  ) async {
+    final answerless = result.answerPending
+        .map(
+          (p) => Question(
+            text: p.text,
+            options: p.options,
+            correctIndex: -1,
+            subject: p.subject,
+            sourceId: sourceId,
+            sourceLabel: title,
+            explanation: p.explanation,
+            page: p.page,
+            part: p.part,
+            answerSource: '',
+          ),
+        )
+        .toList();
+    final all = [...result.questions, ...answerless];
+    final source = BookSource(
+      id: sourceId,
+      title: title,
+      kind: _kind,
+      addedAtIso: DateTime.now().toIso8601String(),
+    );
+    await StorageService.instance.addSource(source, all);
+    _titleController.clear();
+    _pasteController.clear();
+    await _load();
+    if (mounted) {
+      _showMessage(
+        'Saved ${all.length} MCQs from "$title" '
+        '(${answerless.length} baghair jawab). '
+        'Jawab ke baghair test mein result nahi dikhega — '
+        'sahi/ghalat aur score sirf jawab wale questions ka hota hai.',
+      );
     }
   }
 
@@ -495,6 +584,7 @@ class _UploadScreenState extends State<UploadScreen> {
       answerSources: result.answerSources,
       conflicts: result.conflicts,
       unmatchedKeyEntries: result.unmatchedKeyEntries,
+      keyPaperReport: result.keyPaperReport,
       notes: result.notes,
       unmatchedNotes: result.unmatchedNotes,
       fiveOptionNormalised: result.fiveOptionNormalised,
@@ -567,6 +657,97 @@ class _UploadScreenState extends State<UploadScreen> {
     await _importResult(next, title, sourceId);
   }
 
+  /// Attach-a-key flow (20 Nov 2026, "Jawab wali key attach karein"):
+  /// the user attaches the answer key separately (typed/pasted text
+  /// or a key photo/PDF — read through the same import path as the
+  /// book, no new OCR engine). Answers fill by question NUMBER only
+  /// ([applyAttachedKey]); the questions the key did not fill stay
+  /// pending. The result message (green, pulsing) is shown as a
+  /// snack bar AND at the top of the re-opened preview, with the
+  /// still-missing numbers — so the owner can see exactly what the
+  /// key did and what is left.
+  Future<void> _runKeyAttach(
+    PdfImportResult result,
+    String title,
+    String sourceId,
+  ) async {
+    if (result.answerPending.isEmpty || !mounted) return;
+    final attach = await showDialog<KeyAttachResult>(
+      context: context,
+      builder: (ctx) => AttachAnswerKeyDialog(
+        pending: result.answerPending,
+        readKeyFile: _readKeyFileText,
+      ),
+    );
+    if (attach == null || !mounted) return;
+    final keyed = <Question>[];
+    final still = <PendingQuestion>[];
+    for (var i = 0; i < result.answerPending.length; i++) {
+      final p = result.answerPending[i];
+      final c = attach.filled[i];
+      if (c == null) {
+        still.add(p);
+        continue;
+      }
+      keyed.add(
+        Question(
+          text: p.text,
+          options: p.options,
+          correctIndex: c,
+          subject: p.subject,
+          sourceId: sourceId,
+          sourceLabel: title,
+          explanation: p.explanation,
+          page: p.page,
+          part: p.part,
+          answerSource: 'key',
+        ),
+      );
+    }
+    final message = keyAttachResultMessage(attach);
+    _showMessage(message);
+    final next = _withQuestions(
+      result,
+      [...result.questions, ...keyed],
+      remainingPending: still,
+    );
+    await _importResult(next, title, sourceId, keyAttachMessage: message);
+  }
+
+  /// Reads an attached answer-key file and returns its raw text, or
+  /// null when the user cancels picking. Throws when the file cannot
+  /// be read, so the dialog can say so plainly. Same picker + same
+  /// import path as the book import (see [_pickFile] and
+  /// [PdfImportService.extractKeyText]); the MCQ parse the import
+  /// also runs is discarded — a key page is not a question bank.
+  Future<String?> _readKeyFileText() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['pdf', 'txt', 'docx', 'jpg', 'jpeg', 'png'],
+      withData: true,
+    );
+    if (result == null || result.files.isEmpty) return null;
+    final file = result.files.first;
+    final bytes = file.bytes;
+    if (bytes == null) {
+      throw Exception('dobara try karein.');
+    }
+    if (file.size > SubscriptionService.maxBookFileBytes) {
+      throw Exception(
+        'file ${(file.size / (1024 * 1024)).toStringAsFixed(0)} MB — '
+        '100 MB se zyada hai.',
+      );
+    }
+    final ext = (file.extension ?? '').toLowerCase();
+    return PdfImportService.extractKeyText(
+      bytes,
+      extension: ext,
+      urduBook: _urduBook,
+      bestQualityOcr: _bestQualityOcr,
+      visionOcr: _bestQualityOcr ? GeminiVisionOcr() : null,
+    );
+  }
+
   /// The "No MCQs found" dialog is NEVER a dead end. It offers:
   /// (a) MANUAL CORRECTION ("Jawab khud lagayein") when the parse
   /// found questions without answers — the user picks the correct
@@ -591,6 +772,10 @@ class _UploadScreenState extends State<UploadScreen> {
     );
     if (action == 'manual') {
       await _runManualCorrection(result, title, sourceId);
+    } else if (action == 'key') {
+      await _runKeyAttach(result, title, sourceId);
+    } else if (action == 'save-answerless') {
+      await _saveAnswerless(result, title, sourceId);
     }
   }
 
@@ -949,8 +1134,8 @@ class _UploadScreenState extends State<UploadScreen> {
 /// what the app already tried, and (3) the MANUAL CORRECTION option
 /// where it applies (when the parse found questions without
 /// answers). AI generation is PARKED — the dialog never offers it.
-/// Pops 'manual' / 'close'. A public widget so widget tests can
-/// assert its contents.
+/// Pops 'manual' / 'save-answerless' / 'close'. A public widget so
+/// widget tests can assert its contents.
 class NoMcqsDialog extends StatelessWidget {
   const NoMcqsDialog({super.key, required this.result});
 
@@ -969,6 +1154,9 @@ class NoMcqsDialog extends StatelessWidget {
       diagnostics.add(
         'Answers: ${result.answerSources.entries.map((e) => '${e.value} ${e.key} se').join(', ')}',
       );
+    }
+    if (result.keyPaperReport.isNotEmpty) {
+      diagnostics.addAll(result.keyPaperReport);
     }
     if (result.poorOcrPages.isNotEmpty) {
       diagnostics.add(
@@ -1000,6 +1188,13 @@ class NoMcqsDialog extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(reason),
+            // No-answers notice (20 Nov 2026): when EVERY parsed
+            // question lacks an answer, the dialog must say so
+            // plainly too — not only when some do.
+            if (!isLetter && result.answerPending.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              const NoAnswersNoticeBox(),
+            ],
             const SizedBox(height: 12),
             const Text(
               'Diagnostics:',
@@ -1060,6 +1255,23 @@ class NoMcqsDialog extends StatelessWidget {
             icon: const Icon(Icons.edit_outlined),
             label: const Text('Jawab khud lagayein'),
           ),
+        // Attach-a-key (20 Nov 2026): a separate key photo/PDF or
+        // typed key, matched by question number only.
+        if (!isLetter && result.answerPending.isNotEmpty)
+          OutlinedButton.icon(
+            onPressed: () => Navigator.pop(context, 'key'),
+            icon: const Icon(Icons.key_outlined),
+            label: const Text('Jawab wali key attach karein'),
+          ),
+        // No-answers mode (20 Nov 2026): save the pending questions
+        // as answerless (correctIndex -1). Practise is possible; no
+        // answer is invented and no result is ever shown for them.
+        if (!isLetter && result.answerPending.isNotEmpty)
+          OutlinedButton.icon(
+            onPressed: () => Navigator.pop(context, 'save-answerless'),
+            icon: const Icon(Icons.save_outlined),
+            label: const Text('Jawab ke baghair save karein'),
+          ),
       ],
     );
   }
@@ -1109,7 +1321,7 @@ class _ManualCorrectionDialogState extends State<ManualCorrectionDialog> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      '${i + 1}. ${p.text}',
+                      '${p.number != null ? 'Q${p.number}' : '${i + 1}'}. ${p.text}',
                       style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
                     RadioGroup<int>(
@@ -1159,9 +1371,459 @@ class _ManualCorrectionDialogState extends State<ManualCorrectionDialog> {
 /// ('save' / 'manual' / 'mpt' / 'cancel') and the question list as
 /// it stands after any in-preview answer corrections (G-M3) — the
 /// caller saves THIS list, never the pre-correction one.
+/// No-answers notice (20 Nov 2026, owner's words): shown whenever a
+/// parse found questions whose answers are NOT attached — no bold, no
+/// stars, no ABCD key, no tick. The user sent questions only, so
+/// proper MCQs can only be made when the answers come with them. The
+/// same text is used in the extraction preview and in the "No MCQs
+/// found" dialog (the all-pending case), so the message is identical
+/// wherever the user meets it. Kept as one constant so tests can
+/// assert on it and the wording can never drift between dialogs.
+const String noAnswersNotice =
+    'Aap ne sirf questions bheje hain — jawab attach nahi hain '
+    '(na bold, na stars, na ABCD key, na tick). Is liye MCQs tabhi '
+    'mukammal banenge jab jawab bhi saath hon.\n'
+    'You sent questions only — no answers attached (no bold, no stars, '
+    'no ABCD key, no tick). Complete MCQs need the answers too.';
+
+/// A gentle GREEN pulse (20 Nov 2026, owner's request: the notice
+/// must be unmissable — it shines, the user cannot miss it). The
+/// border glows and the background breathes on a slow ~1.8 s cycle.
+/// Explicit greens (the app theme is navy-seeded, so the scheme's
+/// primary is NOT green — the green is deliberate here). Static when
+/// animations are disabled: no motion for users who asked for none.
+/// The card background is always light green, so the text/icon
+/// colours are fixed dark greens that read on it in both themes.
+class _PulsingGreenCard extends StatefulWidget {
+  const _PulsingGreenCard({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_PulsingGreenCard> createState() => _PulsingGreenCardState();
+}
+
+class _PulsingGreenCardState extends State<_PulsingGreenCard>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _pulse;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1800),
+    )..repeat(reverse: true);
+    _pulse = Tween<double>(begin: 0, end: 1).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (MediaQuery.of(context).disableAnimations) {
+      return _greenCard(0.5);
+    }
+    return AnimatedBuilder(
+      animation: _pulse,
+      builder: (context, child) => _greenCard(_pulse.value),
+      child: widget.child,
+    );
+  }
+
+  Widget _greenCard(double t) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Color.lerp(
+          const Color(0xFFE8F5E9),
+          const Color(0xFFC8E6C9),
+          t,
+        ),
+        border: Border.all(
+          color:
+              Color.lerp(
+                const Color(0xFF66BB6A),
+                const Color(0xFF2E7D32),
+                t,
+              ) ??
+              const Color(0xFF43A047),
+          width: 1 + t,
+        ),
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF43A047).withValues(alpha: 0.10 + 0.14 * t),
+            blurRadius: 6 + 6 * t,
+            spreadRadius: t,
+          ),
+        ],
+      ),
+      child: widget.child,
+    );
+  }
+}
+
+/// A prominent notice box for [noAnswersNotice]: GREEN and gently
+/// pulsing (20 Nov 2026, owner's request — unmissable), with an icon,
+/// so it cannot be missed above the summary lines.
+class NoAnswersNoticeBox extends StatelessWidget {
+  const NoAnswersNoticeBox({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const _PulsingGreenCard(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.warning_amber_outlined, color: Color(0xFF2E7D32)),
+          SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              noAnswersNotice,
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF1B5E20),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The key-attach result message ("N jawab key se lag gaye" + which
+/// numbers are still missing), in the same green pulsing card as the
+/// no-answers notice (20 Nov 2026) — the owner asked for the same
+/// unmissable treatment for the key result.
+class KeyAttachResultBox extends StatelessWidget {
+  const KeyAttachResultBox({super.key, required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return _PulsingGreenCard(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.key_outlined, color: Color(0xFF2E7D32)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              message,
+              style: const TextStyle(
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF1B5E20),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Parse-validation findings in the upload preview (MASTER DIRECTIVE
+/// Part 10, 20 Nov 2026): errors block saving (a duplicated question
+/// would corrupt a test), warnings/infos are shown as a note. Never
+/// repairs, never drops — only reports. A public widget so widget
+/// tests can assert its contents.
+class ValidationReportBox extends StatelessWidget {
+  const ValidationReportBox({super.key, required this.report});
+
+  final ValidationReport report;
+
+  @override
+  Widget build(BuildContext context) {
+    if (report.issues.isEmpty) return const SizedBox.shrink();
+    if (report.hasErrors) {
+      final shown = report.errors.take(3).toList();
+      return Container(
+        decoration: BoxDecoration(
+          color: const Color(0xFFFDECEA),
+          border: Border.all(color: const Color(0xFFB3261E)),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Is import mein masla hai — save nahi ho sakta.',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF7A1F1A),
+              ),
+            ),
+            const SizedBox(height: 4),
+            ...shown.map(
+              (i) => Text(
+                '• ${i.detail}${i.questionRef == null ? '' : ' (${i.questionRef})'}',
+                style: const TextStyle(color: Color(0xFF7A1F1A)),
+              ),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Duplicate sawal test ko kharab karte hain — file theek '
+              'karke dobara import karein.',
+              style: TextStyle(color: Color(0xFF7A1F1A)),
+            ),
+          ],
+        ),
+      );
+    }
+    // Warnings first (suspected fabrications, unmatched keys,
+    // conflicts), then infos (missing answers — already headlined by
+    // the no-answers notice); capped so a 100-pending book does not
+    // flood the dialog.
+    final ordered = [
+      ...report.warnings,
+      ...report.issues.where(
+        (i) => i.severity == ValidationSeverity.info,
+      ),
+    ];
+    final shown = ordered.take(5).toList();
+    final rest = ordered.length - shown.length;
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF8E1),
+        border: Border.all(color: const Color(0xFF8D6E00)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Check karne wali baatein:',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF5D4700),
+            ),
+          ),
+          const SizedBox(height: 4),
+          ...shown.map(
+            (i) => Text(
+              '• ${i.detail}${i.questionRef == null ? '' : ' (${i.questionRef})'}',
+              style: const TextStyle(color: Color(0xFF5D4700)),
+            ),
+          ),
+          if (rest > 0)
+            Text(
+              '…aur $rest aur.',
+              style: const TextStyle(color: Color(0xFF5D4700)),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Attach-an-answer-key dialog (20 Nov 2026, "Jawab wali key attach
+/// karein"): the user types/pastes the key ("1-C 2-B 3-D …") or
+/// attaches a key photo/PDF ([readKeyFile] reads it through the same
+/// import path as the book — null means the user cancelled picking).
+/// Applies the key to [pending] by question NUMBER only
+/// ([applyAttachedKey] — never by position, never guessed) and pops
+/// the [KeyAttachResult], or null on Cancel. When the key text has no
+/// parseable entries at all, the dialog says so plainly and STAYS
+/// OPEN — nothing is guessed and nothing is applied.
+class AttachAnswerKeyDialog extends StatefulWidget {
+  const AttachAnswerKeyDialog({
+    super.key,
+    required this.pending,
+    required this.readKeyFile,
+  });
+
+  final List<PendingQuestion> pending;
+  final Future<String?> Function() readKeyFile;
+
+  @override
+  State<AttachAnswerKeyDialog> createState() => _AttachAnswerKeyDialogState();
+}
+
+class _AttachAnswerKeyDialogState extends State<AttachAnswerKeyDialog> {
+  final _keyController = TextEditingController();
+  var _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _keyController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _attachFile() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final text = await widget.readKeyFile();
+      if (text == null) return; // User cancelled picking.
+      if (!mounted) return;
+      setState(() => _keyController.text = text);
+    } catch (e) {
+      if (!mounted) return;
+      setState(
+        () => _error =
+            'Key file parhi nahi gayi. ${e.toString().replaceFirst('Exception: ', '')}',
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  void _apply() {
+    final result = applyAttachedKey(
+      keyText: _keyController.text,
+      pending: widget.pending,
+    );
+    if (result.parseFailed) {
+      setState(() {
+        _error = 'Key samajh nahi aayi — koi jawab nahi mila. '
+            'Format: 1-C 2-B 3-D … (ya "1. C", "1: C", "Q1 C").';
+      });
+      return;
+    }
+    if (mounted) Navigator.pop(context, result);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Jawab wali key attach karein'),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${widget.pending.length} question(s) ke jawab nahi hain. '
+                'Key type karein, paste karein, ya key ki photo / PDF '
+                'attach karein — jawab question NUMBER se lagenge, '
+                'kabhi andaze se nahi.',
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _keyController,
+                maxLines: 6,
+                minLines: 3,
+                decoration: const InputDecoration(
+                  hintText: '1-C 2-B 3-D …',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  _error!,
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.error,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: _busy ? null : _attachFile,
+                icon: const Icon(Icons.attach_file),
+                label: Text(
+                  _busy
+                      ? 'Key parhi ja rahi hai…'
+                      : 'Key ki photo / PDF attach karein',
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _busy ? null : _apply,
+          child: const Text('Key lagayein'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Plain-language result of a key attach (20 Nov 2026): how many
+/// answers the key filled, and which question numbers are STILL
+/// missing (those stay pending — manual or test-without-answers). A
+/// key that parsed but matched nothing says so plainly instead of
+/// pretending it worked.
+String keyAttachResultMessage(KeyAttachResult r) {
+  final filled = r.filled.length;
+  // Orphan-paper lines explain WHY nothing matched, so they belong in
+  // the zero-filled message too — otherwise the reason is swallowed.
+  String orphanLines() {
+    return r.orphanKeyPapers
+        .map(
+          (paper) =>
+              "Key '$paper' mili, lekin is import mein $paper ke sawal nahi — "
+              'key nahi lagayi.',
+        )
+        .join(' ');
+  }
+
+  if (filled == 0) {
+    final parts = <String>[
+      'Key parhi gayi, lekin is se koi jawab nahi laga — number '
+          'match nahi hue. Jawab khud lagayein ya baghair jawab test karein.',
+    ];
+    if (r.orphanKeyPapers.isNotEmpty) parts.add(orphanLines());
+    return parts.join(' ');
+  }
+  final parts = <String>['$filled jawab key se lag gaye.'];
+  if (r.stillMissingNumbers.isNotEmpty) {
+    parts.add(
+      'Abhi bhi jawab nahi: ${r.stillMissingNumbers.map((n) => 'Q$n').join(', ')}.',
+    );
+  }
+  if (r.unnumberedStillMissing > 0) {
+    parts.add(
+      '${r.unnumberedStillMissing} question(s) ka number nahi tha — '
+      'un ke jawab key se nahi lag sakte, khud lagayein.',
+    );
+  }
+  if (r.unresolvedNumbers.isNotEmpty) {
+    parts.add(
+      'Key mein ${r.unresolvedNumbers.map((n) => 'Q$n').join(', ')} ka '
+      'jawab samajh nahi aaya — woh bhi pending rahenge.',
+    );
+  }
+  if (r.orphanKeyPapers.isNotEmpty) {
+    parts.add(orphanLines());
+  }
+  return parts.join(' ');
+}
+
 class PreviewDecision {
   const PreviewDecision(this.action, this.questions);
 
+  /// 'cancel' | 'manual' (answer pending questions by hand) |
+  /// 'key' (attach a separate answer key, then re-show the preview) |
+  /// 'mpt' (use the CSS MPT pattern, then re-show the preview) |
+  /// 'save' (save the answered questions) | 'save-answerless'
+  /// (save answered questions PLUS the still-pending ones as
+  /// answerless questions, correctIndex -1 — testable but never
+  /// scored; see the no-answers notice, 20 Nov 2026).
   final String action;
   final List<Question> questions;
 }
@@ -1198,12 +1860,25 @@ class ExtractionPreviewDialog extends StatefulWidget {
     required this.summaryLines,
     required this.showManual,
     required this.showMpt,
+    this.keyAttachMessage,
+    this.validation,
   });
 
   final PdfImportResult result;
   final List<String> summaryLines;
   final bool showManual;
   final bool showMpt;
+
+  /// The key-attach result message ("N jawab key se lag gaye" + still
+  /// missing numbers), shown green + pulsing at the top when a key
+  /// was just attached in this import.
+  final String? keyAttachMessage;
+
+  /// Parse-validation findings for this import (MASTER DIRECTIVE
+  /// Part 10), or null when the dialog is built without validation
+  /// (e.g. direct widget tests). Errors block saving; warnings and
+  /// infos are shown as a note.
+  final ValidationReport? validation;
 
   @override
   State<ExtractionPreviewDialog> createState() =>
@@ -1242,6 +1917,28 @@ class _ExtractionPreviewDialogState extends State<ExtractionPreviewDialog> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // No-answers notice (20 Nov 2026): whenever the parse
+              // found questions without answers, say so FIRST and
+              // plainly — the user sent questions only. The notice
+              // shows even when SOME questions have answers; the
+              // pending ones are listed by the manual flow.
+              if (widget.result.answerPending.isNotEmpty) ...[
+                const NoAnswersNoticeBox(),
+                const SizedBox(height: 16),
+              ],
+              if (widget.keyAttachMessage != null) ...[
+                KeyAttachResultBox(message: widget.keyAttachMessage!),
+                const SizedBox(height: 16),
+              ],
+              // Parse validation (MASTER DIRECTIVE Part 10): errors
+              // block saving (see the disabled Save button below);
+              // warnings/infos are a note. Shown before the summary
+              // so the user sees the problems before the counts.
+              if (widget.validation != null &&
+                  widget.validation!.issues.isNotEmpty) ...[
+                ValidationReportBox(report: widget.validation!),
+                const SizedBox(height: 16),
+              ],
               Text(widget.summaryLines.join('\n')),
               const SizedBox(height: 16),
               Text(
@@ -1278,7 +1975,8 @@ class _ExtractionPreviewDialogState extends State<ExtractionPreviewDialog> {
                       'Confidence $confidencePct% • '
                       '${q.verificationStatus}',
                     ),
-                    if (q.originalCorrectIndex != null)
+                    if (q.originalCorrectIndex != null &&
+                        q.originalCorrectIndex != -1)
                       Text(
                         'Pehla jawab: '
                         '${String.fromCharCode(65 + q.originalCorrectIndex!)} '
@@ -1324,6 +2022,32 @@ class _ExtractionPreviewDialogState extends State<ExtractionPreviewDialog> {
                 Navigator.pop(context, PreviewDecision('manual', _questions)),
             child: const Text('Jawab khud lagayein'),
           ),
+        // Attach-a-key (20 Nov 2026): a separate key photo/PDF or
+        // typed key, matched by question number only.
+        if (widget.result.answerPending.isNotEmpty)
+          OutlinedButton.icon(
+            onPressed: () => Navigator.pop(
+              context,
+              PreviewDecision('key', _questions),
+            ),
+            icon: const Icon(Icons.key_outlined),
+            label: const Text('Jawab wali key attach karein'),
+          ),
+        // No-answers mode (20 Nov 2026): save the pending questions
+        // as answerless (correctIndex -1) together with the answered
+        // ones. The user can practise them, but no answer is ever
+        // invented and no result is ever shown for them. Blocked by
+        // validation errors like Save (it saves the same questions).
+        if (widget.result.answerPending.isNotEmpty)
+          OutlinedButton(
+            onPressed: widget.validation?.hasErrors == true
+                ? null
+                : () => Navigator.pop(
+                      context,
+                      PreviewDecision('save-answerless', _questions),
+                    ),
+            child: const Text('Jawab ke baghair save karein'),
+          ),
         if (widget.showMpt)
           TextButton(
             onPressed: () =>
@@ -1331,8 +2055,16 @@ class _ExtractionPreviewDialogState extends State<ExtractionPreviewDialog> {
             child: const Text('CSS MPT pattern use karein'),
           ),
         FilledButton(
-          onPressed: () =>
-              Navigator.pop(context, PreviewDecision('save', _questions)),
+          // Validation errors block saving (MASTER DIRECTIVE Part
+          // 10): a duplicated question would corrupt the test.
+          // Manual correction, key attach and Cancel stay available
+          // — the user is never stuck without an exit.
+          onPressed: widget.validation?.hasErrors == true
+              ? null
+              : () => Navigator.pop(
+                    context,
+                    PreviewDecision('save', _questions),
+                  ),
           child: const Text('Save'),
         ),
       ],
@@ -1381,9 +2113,12 @@ class _CorrectAnswerDialogState extends State<CorrectAnswerDialog> {
               Text(q.text, style: const TextStyle(fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
               Text(
-                'Book ka jawab: ${q.correctLetter} (${q.answerSource} se). '
-                'Agar ye ghalat hai to sahi option chunein — pehla jawab '
-                'mehfooz rahega (preview mein "Pehla jawab" dikhega).',
+                q.hasAnswer
+                    ? 'Book ka jawab: ${q.correctLetter} (${q.answerSource} se). '
+                          'Agar ye ghalat hai to sahi option chunein — pehla jawab '
+                          'mehfooz rahega (preview mein "Pehla jawab" dikhega).'
+                    : 'Is question ka jawab abhi nahi hai. Sahi option '
+                          'chunein — jawab save ho jayega.',
               ),
               const SizedBox(height: 12),
               RadioGroup<int>(

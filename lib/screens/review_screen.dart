@@ -25,7 +25,11 @@ class ReviewScreen extends StatelessWidget {
           }
           final q = result.questions[i];
           final chosen = result.answers[i];
-          final wasCorrect = chosen == q.correctIndex;
+          // No-answers mode (20 Nov 2026): a question with no attached
+          // answer was never judged — it is neither correct nor wrong,
+          // and no "correct answer" exists to reveal.
+          final hasAnswer = q.hasAnswer;
+          final wasCorrect = hasAnswer && chosen == q.correctIndex;
           final wasSkipped = chosen == null;
           return Card(
             child: Padding(
@@ -44,28 +48,36 @@ class ReviewScreen extends StatelessWidget {
                       ),
                       Chip(
                         label: Text(
-                          wasSkipped
-                              ? 'Skipped'
-                              : wasCorrect
-                                  ? 'Correct'
-                                  : 'Wrong',
+                          !hasAnswer
+                              ? 'No answer'
+                              : wasSkipped
+                                  ? 'Skipped'
+                                  : wasCorrect
+                                      ? 'Correct'
+                                      : 'Wrong',
                         ),
-                        backgroundColor: wasSkipped
+                        backgroundColor: !hasAnswer
                             ? Theme.of(context)
                                 .colorScheme
                                 .surfaceContainerHighest
-                            : wasCorrect
+                            : wasSkipped
                                 ? Theme.of(context)
                                     .colorScheme
-                                    .primaryContainer
-                                : Theme.of(context)
-                                    .colorScheme
-                                    .errorContainer,
+                                    .surfaceContainerHighest
+                                : wasCorrect
+                                    ? Theme.of(context)
+                                        .colorScheme
+                                        .primaryContainer
+                                    : Theme.of(context)
+                                        .colorScheme
+                                        .errorContainer,
                       ),
                       if (result.markedForReview.contains(i))
                         const Chip(label: Text('Marked')),
                       // Exam mode: every wrong answer costs −0.25.
-                      if (!wasSkipped && !wasCorrect)
+                      // Answerless questions are never scored, so no
+                      // deduction chip for them.
+                      if (hasAnswer && !wasSkipped && !wasCorrect)
                         const Chip(
                           label: Text('−0.25'),
                           backgroundColor: Colors.red,
@@ -82,7 +94,7 @@ class ReviewScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 8),
                   ...List.generate(4, (opt) {
-                    final isCorrect = opt == q.correctIndex;
+                    final isCorrect = hasAnswer && opt == q.correctIndex;
                     final isChosen = opt == chosen;
                     return ListTile(
                       dense: true,
@@ -90,12 +102,12 @@ class ReviewScreen extends StatelessWidget {
                         radius: 14,
                         backgroundColor: isCorrect
                             ? Colors.green
-                            : isChosen
+                            : (hasAnswer && isChosen)
                                 ? Colors.red
                                 : Theme.of(context)
                                     .colorScheme
                                     .surfaceContainerHighest,
-                        foregroundColor: isCorrect || isChosen
+                        foregroundColor: isCorrect || (hasAnswer && isChosen)
                             ? Colors.white
                             : Theme.of(context).colorScheme.onSurface,
                         child: Text(
@@ -106,12 +118,17 @@ class ReviewScreen extends StatelessWidget {
                       title: Text(q.options[opt]),
                       trailing: isCorrect
                           ? const Icon(Icons.check, color: Colors.green)
-                          : isChosen
+                          : (hasAnswer && isChosen)
                               ? const Icon(Icons.close, color: Colors.red)
                               : null,
                     );
                   }),
-                  if (wasSkipped || !wasCorrect)
+                  if (!hasAnswer)
+                    const Text(
+                      'Is question ka jawab nahi hai — score nahi hua.',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    )
+                  else if (wasSkipped || !wasCorrect)
                     Text(
                       'Correct answer: ${q.correctLetter} — ${q.options[q.correctIndex]}',
                       style: const TextStyle(fontWeight: FontWeight.bold),

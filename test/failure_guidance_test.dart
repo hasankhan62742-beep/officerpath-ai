@@ -44,6 +44,17 @@ void main() {
         answerPending: answerPending,
       );
 
+/// Bounded pumps instead of pumpAndSettle: the no-answers notice
+  /// card pulses forever by design (a repeating AnimationController),
+  /// so pumpAndSettle would never settle on any dialog that shows it
+  /// (NoMcqsDialog with pending questions). Five 100 ms frames are
+  /// enough for a dialog to open / close.
+  Future<void> pumpFrames(WidgetTester tester, [int frames = 5]) async {
+    for (var i = 0; i < frames; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+  }
+
   /// Pumps [NoMcqsDialog] behind an "Open" button. The dialog's
   /// popped value is written into [popped] when a button is tapped.
   Future<void> pumpDialog(
@@ -67,7 +78,7 @@ void main() {
       ),
     );
     await tester.tap(find.text('Open'));
-    await tester.pumpAndSettle();
+    await pumpFrames(tester);
   }
 
   group('NoMcqsDialog — all three Req A elements', () {
@@ -97,7 +108,7 @@ void main() {
       // Nothing to correct either (no pending questions).
       expect(find.text('Jawab khud lagayein'), findsNothing);
       await tester.tap(find.text('Close'));
-      await tester.pumpAndSettle();
+      await pumpFrames(tester);
       expect(popped.value, 'close');
     });
 
@@ -156,7 +167,7 @@ void main() {
       expect(find.text('AI se MCQs banayein'), findsNothing);
       expect(find.text('Jawab khud lagayein'), findsOneWidget);
       await tester.tap(find.text('Jawab khud lagayein'));
-      await tester.pumpAndSettle();
+      await pumpFrames(tester);
       expect(popped.value, 'manual');
     });
   });
@@ -203,7 +214,7 @@ void main() {
         ),
       );
       await tester.tap(find.text('Open'));
-      await tester.pumpAndSettle();
+      await pumpFrames(tester);
     }
 
     testWidgets('explains manual marking; Save disabled until a pick',
@@ -236,14 +247,14 @@ void main() {
       // option into view before tapping it.
       await tester.ensureVisible(find.text('Paris'));
       await tester.tap(find.text('Paris'));
-      await tester.pumpAndSettle();
+      await pumpFrames(tester);
       expect(find.text('Save (1)'), findsOneWidget);
       await tester.ensureVisible(find.text('Blue'));
       await tester.tap(find.text('Blue'));
-      await tester.pumpAndSettle();
+      await pumpFrames(tester);
       expect(find.text('Save (2)'), findsOneWidget);
       await tester.tap(find.text('Save (2)'));
-      await tester.pumpAndSettle();
+      await pumpFrames(tester);
       expect(popped.value, {0: 2, 1: 2});
     });
 
@@ -252,9 +263,9 @@ void main() {
       final popped = ValueNotifier<Map<int, int>?>(null);
       await pumpCorrection(tester, popped);
       await tester.tap(find.text('Paris'));
-      await tester.pumpAndSettle();
+      await pumpFrames(tester);
       await tester.tap(find.text('Save (1)'));
-      await tester.pumpAndSettle();
+      await pumpFrames(tester);
       expect(popped.value, {0: 2});
     });
 
@@ -263,9 +274,9 @@ void main() {
       final popped = ValueNotifier<Map<int, int>?>(null);
       await pumpCorrection(tester, popped);
       await tester.tap(find.text('Paris'));
-      await tester.pumpAndSettle();
+      await pumpFrames(tester);
       await tester.tap(find.text('Cancel'));
-      await tester.pumpAndSettle();
+      await pumpFrames(tester);
       expect(popped.value, isNull);
     });
   });
@@ -289,7 +300,7 @@ void main() {
         ),
       );
       await tester.tap(find.text('Open'));
-      await tester.pumpAndSettle();
+      await pumpFrames(tester);
       expect(find.text('File nahi parhi ja saki'), findsOneWidget);
       expect(find.textContaining('Dobara download karein'), findsOneWidget);
       expect(find.text('What to do next:'), findsOneWidget);
@@ -298,7 +309,7 @@ void main() {
       expect(find.textContaining('text PDF banayein'), findsOneWidget);
       expect(find.text('AI se MCQs banayein'), findsNothing);
       await tester.tap(find.text('OK'));
-      await tester.pumpAndSettle();
+      await pumpFrames(tester);
       expect(find.text('File nahi parhi ja saki'), findsNothing);
     });
   });

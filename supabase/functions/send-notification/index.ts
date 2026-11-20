@@ -212,7 +212,10 @@ async function sendToToken(
     detail = await res.text();
   } catch { /* body unreadable — status is enough */ }
   const unregistered = detail.includes("UNREGISTERED") ||
-    detail.includes("INVALID_ARGUMENT");
+    detail.includes("NOT_FOUND");
+  // NOTE (audit L5): INVALID_ARGUMENT is deliberately NOT treated as a
+  // dead token — it can also mean a malformed message, and clearing on
+  // it could wipe valid tokens. It counts as a plain send failure.
   return { ok: false, unregistered };
 }
 

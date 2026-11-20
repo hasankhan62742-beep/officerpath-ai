@@ -108,22 +108,22 @@ class _OfficerPathAppState extends State<OfficerPathApp> {
   }
 
   /// Handles `officerpath://reset-password` links: exchanges the
-  /// link's code / tokens for a recovery session, then opens the
-  /// new-password screen. A link without a usable token still opens
+  /// link's PKCE code for a recovery session, then opens the
+  /// new-password screen. A link without a usable code still opens
   /// the screen — it explains the link expired.
+  ///
+  /// PKCE-ONLY (audit L7): bare `access_token`/`refresh_token` values
+  /// in the URL are never accepted — no `setSession()` with
+  /// URL-supplied tokens. Such a link just opens the screen without
+  /// a session, i.e. the expired-link state.
   Future<void> _handleDeepLink(Uri uri) async {
     final link = parseResetPasswordUri(uri);
     if (!link.isResetLink) return;
     if (!widget.supabaseReady) return;
     try {
-      final auth = Supabase.instance.client.auth;
       if (link.code != null) {
+        final auth = Supabase.instance.client.auth;
         await auth.exchangeCodeForSession(link.code!);
-      } else if (link.accessToken != null && link.refreshToken != null) {
-        await auth.setSession(
-          link.refreshToken!,
-          accessToken: link.accessToken,
-        );
       }
     } catch (_) {
       // No valid recovery session — ResetPasswordScreen shows the
