@@ -92,5 +92,7 @@ flutter {
 
 dependencies {
     // ota_update (v1.3) needs Java 8+ APIs on older Android versions.
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.3")
+    // Must be 2.1.4+ — the ota_update AAR requires it (CI 20 Nov 2026:
+    // checkDebugAarMetadata failed on 2.0.3).
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }
