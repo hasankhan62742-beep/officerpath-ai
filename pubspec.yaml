@@ -1,0 +1,86 @@
+name: officerpath_ai
+description: "OfficerPath AI — Apni book se officer tak ka rasta. Upload your own MCQ book or past papers, generate a timed test in the real commission pattern (PPSC / PMS / CSS / FPSC / KPPSC / BPSC / SPSC), attempt it, and track your evaluation."
+# Prevent accidental publishing to pub.dev
+publish_to: "none"
+version: 2.0.0+5000
+
+environment:
+  sdk: ">=3.7.0 <4.0.0"
+  flutter: ">=3.35.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # File picking (PDF / TXT) from phone storage.
+  file_picker: ^8.0.0
+  # Local persistence (offline-first): attempts, sources, imported questions.
+  sqflite: ^2.4.0
+  path: ^1.9.0
+  # Small flags (first-run seeding, last exam).
+  shared_preferences: ^2.5.0
+  # Dates in history screen.
+  intl: ^0.20.2
+  # Open WhatsApp / links for manual payment proof (v1 activation).
+  url_launcher: ^6.3.0
+  # Current Affairs RSS fetching (free publisher feeds, no API key).
+  http: ^1.2.0
+  xml: ^6.5.0
+  # .docx MCQ banks (v1.2): a .docx is a ZIP of XML — `archive` unzips
+  # it, `xml` parses word/document.xml. Pinned to 4.4.0 by the override
+  # below (pdf 3.12.0 caps archive < 4.1.0, but only uses it on web).
+  archive: ^4.4.0
+  pdfx: 2.11.0
+  google_mlkit_text_recognition: 0.16.0
+  # Result download (v1.2): PDF export of a test result. Moved here from
+  # dev_dependencies — it is now a runtime dependency.
+  pdf: 3.12.0
+  # Result download (v1.2): share sheet for the exported PDF/PNG, and a
+  # staging directory for the file before sharing. Both work offline.
+  share_plus: ^11.0.0
+  path_provider: ^2.1.0
+  flutter_secure_storage: ^10.3.4
+  tesseract_ocr: ^0.6.0
+  # Camera-photo OCR preprocessing (v1.3): grayscale + contrast
+  # stretch + sharpen before Tesseract, for phone photos with
+  # shadows, glare and uneven light. Already a transitive dependency
+  # (via archive), pinned to the locked 4.11.0.
+  image: ^4.11.0
+  # In-app updates (v1.3, GitHub sideload only): check the latest GitHub
+  # Release, download the APK and hand it to the system installer.
+  ota_update: ^7.1.0
+  # Installed version, for the update check.
+  # ^9.0.1: v10 needs Dart >=3.10, this project is on Dart 3.9.2.
+  package_info_plus: ^9.0.1
+  # v2.0 backend (Supabase Free): Auth (email + Google), Postgres, Edge
+  # Functions for single-use code redemption. URL/anon key come from
+  # --dart-define (SUPABASE_URL / SUPABASE_ANON_KEY); empty = offline v1.
+  supabase_flutter: ^2.9.0
+  google_sign_in: ^7.0.0
+  # Deep links (password-reset email -> in-app new-password screen).
+  app_links: ^6.0.0
+  # SHA-256 for code-hashing helpers / tests.
+  crypto: ^3.0.0
+  # v2.0 push notifications (Firebase Cloud Messaging — free on Spark).
+  # If `flutter pub get` cannot resolve these majors, fall back to
+  # firebase_core ^3.0.0 + firebase_messaging ^15.0.0.
+  firebase_core: ^4.0.0
+  firebase_messaging: ^16.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/sample_books/
+    - assets/tessdata_config.json
+    - assets/tessdata/
+
+# image 4.11.0 (via pdf, dev-only) calls ZLibDecoder.decodeLazy, which
+# only exists in archive >= 4.4.0 — but pdf 3.12.0 caps archive < 4.1.0.
+# archive is used by pdf only in its web file, never on Android, so this
+# override is safe here. Remove it if pdf is upgraded past 3.12.0.
+dependency_overrides:
+  archive: 4.4.0

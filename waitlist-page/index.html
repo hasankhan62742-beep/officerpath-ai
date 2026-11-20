@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="ur">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OfficerPath AI — Version 2 Waitlist</title>
+<meta name="description" content="OfficerPath AI Version 2 jald aa raha hai. Apni Gmail likhein — launch hote hi download link aur user guide seedha aap ko milega.">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; background: #0B1F3A; color: #ffffff; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 24px 16px; }
+  .card { width: 100%; max-width: 560px; background: #ffffff; color: #0B1F3A; border-radius: 16px; padding: 32px 28px; box-shadow: 0 12px 40px rgba(0,0,0,.35); }
+  .badge { display: inline-block; background: #C9A227; color: #0B1F3A; font-weight: 700; font-size: 13px; letter-spacing: 1px; padding: 6px 12px; border-radius: 999px; margin-bottom: 16px; }
+  h1 { font-size: 30px; line-height: 1.25; margin-bottom: 8px; }
+  h1 span { color: #9a7b14; }
+  p.lead { font-size: 17px; line-height: 1.6; color: #334155; margin-bottom: 16px; }
+  ul { list-style: none; margin: 0 0 20px 0; }
+  ul li { padding: 7px 0 7px 28px; position: relative; font-size: 16px; line-height: 1.5; }
+  ul li::before { content: "✓"; position: absolute; left: 4px; color: #9a7b14; font-weight: 700; }
+  form { margin-top: 8px; }
+  label { display: block; font-weight: 700; font-size: 15px; margin-bottom: 8px; }
+  input[type="email"] { width: 100%; padding: 14px 16px; font-size: 17px; border: 2px solid #cbd5e1; border-radius: 10px; outline: none; }
+  input[type="email"]:focus { border-color: #C9A227; }
+  button { width: 100%; margin-top: 12px; padding: 15px; font-size: 18px; font-weight: 700; color: #0B1F3A; background: #C9A227; border: none; border-radius: 10px; cursor: pointer; }
+  button:hover { background: #d9b73c; }
+  .note { font-size: 14px; color: #64748b; line-height: 1.5; margin-top: 14px; }
+  .thanks { display: none; text-align: center; padding: 12px 0; }
+  .thanks h2 { font-size: 24px; margin-bottom: 8px; }
+  .thanks p { color: #334155; line-height: 1.6; }
+  footer { margin-top: 20px; text-align: center; color: #cbd5e1; font-size: 14px; line-height: 1.6; }
+  footer b { color: #C9A227; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <span class="badge">VERSION 2 — JALD AA RAHA HAI</span>
+    <h1>OfficerPath AI <span>Waitlist</span></h1>
+    <p class="lead">Apni book se officer tak ka rasta — ab aur behtar. Version 2 mein ye sab aa raha hai:</p>
+    <ul>
+      <li>Login system — apni ID aur password se</li>
+      <li>Har tarah ke PDF aur MCQ formats ki support</li>
+      <li>PDF download ka masla hal</li>
+      <li>App ke andar hi naye version ki update</li>
+      <li>Admin panel — behtar intizam</li>
+    </ul>
+    <div id="form-box">
+      <form action="https://formsubmit.co/hello@abdulqadeerml.com" method="POST">
+        <label for="email">Apni Gmail likhein:</label>
+        <input type="email" id="email" name="email" placeholder="aapki@gmail.com" required>
+        <input type="text" name="_honey" style="display:none">
+        <input type="hidden" name="_subject" value="OfficerPath AI Waitlist — nayi Gmail">
+        <input type="hidden" name="_captcha" value="false">
+        <input type="hidden" name="_template" value="table">
+        <input type="hidden" name="_next" value="https://hasankhan62742-beep.github.io/officerpath-ai/?done=1">
+        <button type="submit">Waitlist mein shaamil hon</button>
+      </form>
+      <p class="note">Launch hote hi download link aur user guide seedha aap ki Gmail par bheja jayega. Aap ki Gmail sirf is ke liye istemal hogi — kisi aur ko nahi di jayegi.</p>
+      <p class="note">Aham ittila: Version 1 ka download filhal aarzi tor par band hai. Hamari team Version 2 par kaam kar rahi hai.</p>
+    </div>
+    <div class="thanks" id="thanks-box">
+      <h2>Shukriya! ✓</h2>
+      <p>Aap waitlist mein shaamil ho gaye hain. Version 2 launch hote hi download link aur user guide aap ki Gmail par bhej di jayegi.</p>
+    </div>
+  </div>
+  <footer>Developed by <b>Muhammad Abdul Qadeer</b><br>OfficerPath AI — Apni book se officer tak ka rasta</footer>
+  <script>
+    if (new URLSearchParams(window.location.search).get('done') === '1') {
+      document.getElementById('form-box').style.display = 'none';
+      document.getElementById('thanks-box').style.display = 'block';
+    }
+  </script>
+</body>
+</html>

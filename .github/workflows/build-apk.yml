@@ -1,0 +1,147 @@
+# OfficerPath AI — build the arm64 debug APK and attach it to the GitHub Release.
+#
+# Why CI exists: the app is distributed as a sideloaded APK via GitHub
+# Releases (NOT the Play Store). Every release needs exactly one asset,
+# officerpath-ai-<version>-arm64.apk, because the in-app updater
+# (lib/services/app_update_service.dart) looks for the `-arm64.apk` asset
+# on the latest release. Building it by hand on a VM is slow and fragile
+# (see the proxy/quirk notes in README.md), so the release build is
+# automated here.
+#
+# Triggers:
+#   - release published: the normal path — create the release on
+#     github.com (tag vX.Y.Z, no asset), CI builds the APK and attaches it.
+#   - tag push (v*): builds + tests the tag the same way, WITHOUT
+#     attaching anything (no release exists yet at push time, so the
+#     upload step is skipped and the APK is kept as a workflow artifact).
+#
+# Toolchain (pinned to the versions verified on the build VM, 19 Nov 2026):
+#   Flutter 3.35.7, JDK 17 (Temurin), Android SDK platform 35.
+# No keystore / signing config: the owner's release keystore does not
+# exist yet, so this builds DEBUG. A release-key build cannot install
+# over the debug-signed v1.2.0 anyway (same-signing-key rule), so debug
+# is the correct ship target until the keystore exists.
+#
+# No proxy handling: the VM's Gradle builds needed a proxy password
+# refresh (egress MITM CA + proxy auth). GitHub-hosted runners have
+# direct internet, so none of that is needed here.
+#
+# Auth: `gh release upload` uses GITHUB_TOKEN, which GitHub Actions
+# provides automatically — no personal access token is needed or used.
+# `permissions: contents: write` below is what lets that token attach
+# the asset to the release.
+
+name: Build arm64 APK
+
+# NOTE: `on` is quoted because unquoted `on` parses as boolean true
+# under YAML 1.1; GitHub Actions accepts the quoted form identically.
+"on":
+  release:
+    types: [published]
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      # (a) Check out the tagged commit / release commit.
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # (b) JDK 17 — what the Android Gradle plugin in this project needs.
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # (c) Flutter 3.35.7 — the version the app was verified against
+      # (pubspec requires Flutter >= 3.35.0; Dart 3.9.2).
+      - name: Set up Flutter 3.35.7
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.7'
+          channel: stable
+
+      # (d) Resolve dependencies.
+      - name: flutter pub get
+        run: flutter pub get
+
+      # (e) Static analysis — must be clean before any APK is shipped.
+      - name: flutter analyze
+        run: flutter analyze
+
+      # (f) Unit/widget tests — must all pass before any APK is shipped.
+      - name: flutter test
+        run: flutter test
+
+      # (g) Build ONLY the arm64 debug APK.
+      #
+      # Supabase config comes ONLY from --dart-define (see
+      # lib/services/supabase_config.dart): without these two flags the
+      # APK ships with an empty URL/key, isConfigured is false, and the
+      # v2 login / sync screens stay hidden. The values come from the
+      # SUPABASE_URL and SUPABASE_ANON_KEY repository secrets.
+      #
+      # WHY --split-per-abi (and NOT --target-platform android-arm64):
+      # `flutter build apk --debug --target-platform android-arm64` does
+      # NOT isolate arm64 in debug mode — the flag is ignored for debug
+      # builds (flutter/flutter#153359) and produces a FAT app-debug.apk
+      # with all ABIs. Verified on this project's own VM, 19 Nov 2026:
+      #   --target-platform android-arm64 --debug -> app-debug.apk,
+      #     151,345,632 bytes (fat, all ABIs)
+      #   --split-per-abi --debug -> app-arm64-v8a-debug.apk,
+      #     119,172,927 bytes — exactly the size of the live v1.2.0
+      #     release asset, i.e. the file users actually installed.
+      # So: build split-per-abi and pick the arm64 file in the next step.
+      # NOTE: split-per-abi adds ABI*1000 to the version code (arm64 = 2),
+      # so the arm64 APK's versionCode is 5000 + 2000 = 7000, not the
+      # pubspec's 5000. That is still > the live v1.2.0 (4002), so it
+      # installs over it. The updater compares the tag string, not the
+      # version code, so this does not affect in-app updates.
+      - name: Build arm64 debug APK
+        run: |
+          flutter build apk --debug --split-per-abi \
+            --dart-define=SUPABASE_URL=${{ secrets.SUPABASE_URL }} \
+            --dart-define=SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
+
+      # (h) Rename to the asset name the updater and users expect:
+      # tag v1.3.0 -> officerpath-ai-1.3.0-arm64.apk
+      # (the leading 'v' is stripped; the tag is the version).
+      - name: Rename APK to officerpath-ai-<version>-arm64.apk
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          SRC="build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk"
+          DEST="officerpath-ai-${VERSION}-arm64.apk"
+          test -f "$SRC" || { echo "ERROR: expected APK not found: $SRC"; ls -l build/app/outputs/flutter-apk/; exit 1; }
+          cp "$SRC" "$DEST"
+          ls -lh "$DEST"
+
+      # Keep the APK as a workflow artifact on every run, so a tag-push
+      # run (which has no release to attach to) still leaves a
+      # downloadable APK behind.
+      - name: Upload APK as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: officerpath-ai-${{ github.ref_name }}-arm64-apk
+          path: officerpath-ai-*.apk
+          if-no-files-found: error
+
+      # (i) Attach the APK to the GitHub Release. Runs ONLY on the
+      # release-published trigger: on a bare tag push no release exists
+      # yet, so `gh release upload` would fail. --clobber replaces the
+      # asset if the workflow is ever re-run for the same release.
+      - name: Attach APK to the GitHub Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          gh release upload "$TAG" "officerpath-ai-${VERSION}-arm64.apk" --clobber

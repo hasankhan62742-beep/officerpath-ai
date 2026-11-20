@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- OfficerPath AI brand navy. The adaptive foreground PNG is opaque
+         navy, so this layer is a fallback only and never shows through. -->
+    <color name="ic_launcher_background">#0B1F3A</color>
+</resources>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- OfficerPath AI v1.2 launcher icon (candidate — pending user approval
+     of the design). Foreground is a PNG: the shield artwork scaled to
+     66dp of the 108dp canvas so the whole shield, flag and title sit
+     inside the 66dp adaptive safe zone; the background is solid navy. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>

@@ -1,0 +1,29 @@
+<!-- ============================================================
+     OfficerPath AI — Admin panel: Waitlist section (SNIPPET).
+     DO NOT use this file on its own. It is a fragment to paste into
+     admin/index.html — see docs/waitlist.md for the exact anchor
+     point (inside #app-view, right after the Send notification
+     section, before <p id="toast">). No new CSS is needed: it reuses
+     the existing .card / .table-wrap / .muted / .hidden classes.
+     No credentials in this file.
+     ============================================================ -->
+<section class="card" id="waitlist-section">
+  <h2>Waitlist — v2 launch list</h2>
+  <p class="muted">Emails jo v2 waitlist page se aaye hain. v2 launch
+  par in sab ko email bheja jayega (neeche Export CSV se list nikalein).</p>
+  <p><strong>Total: <span id="waitlist-count">—</span></strong></p>
+  <input id="waitlist-search" type="search" placeholder="Search by email…" aria-label="Search waitlist by email">
+  <div class="table-wrap">
+    <table id="waitlist-table">
+      <thead>
+        <tr>
+          <th>Email</th><th>Date</th><th>Source</th>
+        </tr>
+      </thead>
+      <tbody id="waitlist-tbody"></tbody>
+    </table>
+  </div>
+  <p id="waitlist-empty" class="muted hidden">No waitlist signups yet.</p>
+  <p id="waitlist-error" class="error-text hidden" role="alert"></p>
+  <button id="waitlist-export-btn" type="button">Export CSV</button>
+</section>

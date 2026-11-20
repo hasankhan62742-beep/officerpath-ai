@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Needed for future v2 cloud sync / AI generation. v1 works fully offline. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- In-app updates (v1.3): install the downloaded APK. Android asks
+         the user once to allow "Install unknown apps" for OfficerPath. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Result download (v1.3 fix): saving a PDF to Downloads on
+         Android 9 and below needs WRITE_EXTERNAL_STORAGE. Android 10+
+         uses MediaStore instead and needs NO permission, so this is
+         capped at SDK 28 — it never prompts on modern phones. -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+    <!-- file_picker handles storage permission requests itself on Android 13+. -->
+    <!-- Push notifications (v2.0.0, FCM): Android 13+ needs this runtime
+         permission — the app asks once, after first login, via
+         FirebaseMessaging.requestPermission (see PushService). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:label="OfficerPath AI"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:allowBackup="false">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!-- v2.0.0 password reset: the reset email links to
+                 officerpath://reset-password and opens the in-app
+                 new-password screen. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="officerpath" android:host="reset-password" />
+            </intent-filter>
+        </activity>
+        <!-- Push notifications (v2.0.0, FCM): default notification icon
+             (app launcher icon) and channel. The firebase_messaging
+             plugin creates the channel automatically when the first
+             notification arrives; these meta-data entries only pick
+             the icon and the channel id. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@mipmap/ic_launcher" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="officerpath_updates" />
+        <!-- Don't delete the meta-data below. It is used by the Flutter tool
+             to generate the C++ engine glue. -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+</manifest>

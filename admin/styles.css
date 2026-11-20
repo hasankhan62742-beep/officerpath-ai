@@ -1,0 +1,204 @@
+/* OfficerPath AI — Admin panel styles. Navy + gold, same as the app. */
+:root {
+  --navy: #0b1f3a;
+  --navy-dark: #071426;
+  --gold: #c9a227;
+  --gold-soft: #f5eed3;
+  --paper: #faf8f2;
+  --surface: #ffffff;
+  --text: #1a1a1a;
+  --muted: #5f6b7a;
+  --danger: #b3261e;
+  --success: #2e7d32;
+  --border: #d8d2c0;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--paper);
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.topbar {
+  background: var(--navy);
+  color: #fff;
+  padding: 16px 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.topbar h1 { margin: 0; font-size: 1.4rem; }
+.subtitle { margin: 2px 0 0; opacity: 0.85; font-size: 0.9rem; }
+
+#admin-info { display: flex; align-items: center; gap: 12px; }
+
+main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.error-card { border-color: var(--danger); background: #fdf3f2; }
+.error-text { color: var(--danger); font-weight: 600; }
+.muted { color: var(--muted); font-size: 0.9rem; }
+.hidden { display: none !important; }
+
+h2 { margin-top: 0; color: var(--navy); }
+h3 { color: var(--navy); }
+
+label { display: block; margin: 12px 0 4px; font-weight: 600; }
+
+input[type="email"],
+input[type="password"],
+input[type="search"],
+textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+  background: #fff;
+}
+
+button {
+  background: var(--navy);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 18px;
+  font: inherit;
+  cursor: pointer;
+  margin-top: 12px;
+}
+
+button:hover { opacity: 0.9; }
+
+#logout-btn, #user-detail-close, #approve-close-btn { margin-top: 0; background: #fff; color: var(--navy); border: 1px solid var(--navy); }
+.danger-btn { background: var(--danger); }
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.stat {
+  background: var(--gold-soft);
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+.stat-label { font-size: 0.85rem; color: var(--muted); }
+.stat-value { font-size: 1.6rem; font-weight: 700; color: var(--navy); }
+
+.chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 110px;
+  padding: 8px 4px 0;
+  border-bottom: 2px solid var(--navy);
+}
+
+.chart-bar {
+  flex: 1;
+  background: var(--gold);
+  min-height: 2px;
+  border-radius: 3px 3px 0 0;
+}
+
+.chart-bar.zero { background: #e3ddc8; }
+
+.table-wrap { overflow-x: auto; }
+
+table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eee; }
+th { color: var(--navy); white-space: nowrap; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: #f7f3e6; }
+#payments-tbody tr, #codes-tbody tr { cursor: default; }
+
+.chip {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 20px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  background: var(--gold-soft);
+  color: var(--navy);
+}
+
+.chip.premium { background: var(--gold); color: var(--navy-dark); }
+.chip.approved, .chip.used { background: #d9ecd9; color: var(--success); }
+.chip.rejected, .chip.expired { background: #fbe3e1; color: var(--danger); }
+
+.row-between {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  background: var(--navy);
+  color: #fff;
+  padding: 12px 20px;
+  border-radius: 10px;
+  max-width: 90vw;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(7, 20, 38, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.modal-box {
+  background: #fff;
+  border-radius: 12px;
+  padding: 24px;
+  max-width: 560px;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.code-big {
+  font-size: 1.6rem;
+  text-align: center;
+  background: var(--gold-soft);
+  padding: 12px;
+  border-radius: 8px;
+  letter-spacing: 2px;
+}
+
+footer { text-align: center; padding: 8px 16px 24px; }
+
+@media (max-width: 640px) {
+  .topbar { padding: 12px 16px; }
+  main { padding: 12px; }
+  .card { padding: 16px; }
+}

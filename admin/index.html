@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OfficerPath AI — Admin Panel</title>
+  <link rel="stylesheet" href="styles.css">
+  <!-- Supabase JS client (UMD build, exposes global `supabase`). -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <!-- Owner config: copy config.example.js to config.js and fill in the
+       real Supabase URL + anon key. config.js is never committed. -->
+  <script src="config.js"></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>OfficerPath AI — Admin</h1>
+      <p class="subtitle">Users, payments, activation codes &amp; Premium control</p>
+    </div>
+    <div id="admin-info" class="hidden">
+      <span id="admin-email"></span>
+      <button id="logout-btn" type="button">Log out</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Shown when config.js is missing or still has placeholders. -->
+    <section id="config-error" class="card error-card hidden" aria-live="polite">
+      <h2>Setup needed</h2>
+      <p id="config-error-text">The admin panel is not configured yet.</p>
+      <p>Copy <code>config.example.js</code> to <code>config.js</code> in this
+      folder and fill in your Supabase project URL and anon key (see
+      <code>README.md</code>). Never put the secret admin key here.</p>
+    </section>
+
+    <!-- Admin login (Supabase Auth email + password). -->
+    <section id="login-view" class="card hidden">
+      <h2>Admin sign in</h2>
+      <p>Sign in with the admin account created in Supabase Auth. Only
+      accounts flagged <code>is_admin</code> in the <code>profiles</code>
+      table can use this panel.</p>
+      <form id="login-form">
+        <label for="login-email">Email</label>
+        <input id="login-email" type="email" required autocomplete="email" placeholder="admin@example.com">
+        <label for="login-password">Password</label>
+        <input id="login-password" type="password" required autocomplete="current-password" placeholder="Password">
+        <p id="login-error" class="error-text hidden" role="alert"></p>
+        <button id="login-btn" type="submit">Sign in</button>
+      </form>
+    </section>
+
+    <!-- Shown when a signed-in user is not an admin. -->
+    <section id="access-denied" class="card error-card hidden" aria-live="polite">
+      <h2>Access denied</h2>
+      <p><span id="access-denied-email"></span> is signed in, but this
+      account is not an admin. Ask the owner to set
+      <code>is_admin = true</code> for this user in the
+      <code>profiles</code> table.</p>
+      <button id="access-denied-back-btn" type="button">Back to sign in</button>
+    </section>
+
+    <!-- Main app (only rendered after the is_admin check passes). -->
+    <div id="app-view" class="hidden">
+      <section class="card">
+        <h2>Dashboard</h2>
+        <div class="stats">
+          <div class="stat"><span class="stat-label">Total users</span><span class="stat-value" id="stat-total-users">—</span></div>
+          <div class="stat"><span class="stat-label">Premium users</span><span class="stat-value" id="stat-premium-users">—</span></div>
+          <div class="stat"><span class="stat-label">Pending payments</span><span class="stat-value" id="stat-pending-payments">—</span></div>
+          <div class="stat"><span class="stat-label">Codes issued</span><span class="stat-value" id="stat-codes-issued">—</span></div>
+          <div class="stat"><span class="stat-label">Codes used</span><span class="stat-value" id="stat-codes-used">—</span></div>
+          <div class="stat"><span class="stat-label">Tests taken</span><span class="stat-value" id="stat-tests-taken">—</span></div>
+        </div>
+        <h3>Signups — last 30 days</h3>
+        <div id="signup-chart" class="chart" aria-label="Signups per day, last 30 days"></div>
+        <p id="dashboard-error" class="error-text hidden" role="alert"></p>
+      </section>
+
+      <section class="card">
+        <h2>Users</h2>
+        <input id="users-search" type="search" placeholder="Search by email or username…" aria-label="Search users by email or username">
+        <div class="table-wrap">
+          <table id="users-table">
+            <thead>
+              <tr>
+                <th>Username</th><th>Email</th><th>Plan</th>
+                <th>Premium until</th><th>Tests taken</th><th>Member since</th>
+              </tr>
+            </thead>
+            <tbody id="users-tbody"></tbody>
+          </table>
+        </div>
+        <p id="users-empty" class="muted hidden">No users match this search.</p>
+      </section>
+
+      <!-- User detail (payments, codes, test results, revoke). -->
+      <section id="user-detail" class="card hidden">
+        <div class="row-between">
+          <h2 id="user-detail-title">User detail</h2>
+          <button id="user-detail-close" type="button">Close</button>
+        </div>
+        <div id="user-detail-body"></div>
+        <button id="revoke-premium-btn" type="button" class="danger-btn">Revoke Premium</button>
+      </section>
+
+      <section class="card">
+        <h2>Pending payments</h2>
+        <p class="muted">Approve a payment to issue the buyer a single-use activation code.
+        Reject it when the payment cannot be verified.</p>
+        <div id="payments-queue" class="table-wrap">
+          <table id="payments-table">
+            <thead>
+              <tr>
+                <th>Email</th><th>Plan</th><th>Method</th>
+                <th>Transaction ID</th><th>Date</th><th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="payments-tbody"></tbody>
+          </table>
+        </div>
+        <p id="payments-empty" class="muted hidden">No pending payments. 🎉</p>
+      </section>
+
+      <section class="card">
+        <h2>Activation codes</h2>
+        <p class="muted">Only the hash prefix is shown here — the plain code is
+        visible to the admin exactly once, in the approval popup, and never again.</p>
+        <div class="table-wrap">
+          <table id="codes-table">
+            <thead>
+              <tr>
+                <th>Hash prefix</th><th>Plan</th><th>Buyer email</th>
+                <th>Issued</th><th>Expires</th><th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="codes-tbody"></tbody>
+          </table>
+        </div>
+        <p id="codes-empty" class="muted hidden">No codes issued yet.</p>
+      </section>
+
+      <!-- Push notifications (v2.0.0): announce a new version or send an
+           announcement to installed users. Sends via the
+           send-notification Edge Function with the admin's JWT; only
+           users who opted in and have a device token receive it. -->
+      <section class="card" id="push-section">
+        <h2>Send notification</h2>
+        <p class="muted">Push notification bhejein — nayi version ka elaan ya
+        announcement. Sirf un users tak pahunchega jin ke phone par app
+        installed hai aur notifications on hain (opted-out users ko
+        kabhi nahi bhejta).</p>
+        <form id="push-form">
+          <label for="push-title">Title</label>
+          <input id="push-title" type="text" required maxlength="100" placeholder="jaise: OfficerPath AI v2.0.0 aa gayi hai">
+          <label for="push-message">Message</label>
+          <textarea id="push-message" rows="3" required maxlength="500" placeholder="jaise: Nayi version download karein — aap ke tests aur books mehfooz rahein ge."></textarea>
+          <label for="push-audience">Audience</label>
+          <select id="push-audience">
+            <option value="all">All users</option>
+            <option value="premium">Premium only</option>
+            <option value="free">Free users</option>
+          </select>
+          <label for="push-type">Type</label>
+          <select id="push-type">
+            <option value="update_available">New version available</option>
+            <option value="announcement">Announcement</option>
+          </select>
+          <div id="push-version-wrap">
+            <label for="push-version">Version</label>
+            <input id="push-version" type="text" placeholder="jaise: 2.0.0">
+          </div>
+          <p id="push-error" class="error-text hidden" role="alert"></p>
+          <p id="push-result" class="hidden" role="status"></p>
+          <button id="push-send-btn" type="submit">Send notification</button>
+        </form>
+        <h3>Sent history</h3>
+        <div class="table-wrap">
+          <table id="push-history-table">
+            <thead>
+              <tr>
+                <th>Title</th><th>Audience</th><th>Type</th>
+                <th>Sent</th><th>Recipients</th>
+              </tr>
+            </thead>
+            <tbody id="push-history-tbody"></tbody>
+          </table>
+        </div>
+        <p id="push-history-empty" class="muted hidden">No notifications sent yet.</p>
+      </section>
+
+<section class="card" id="waitlist-section">
+  <h2>Waitlist — v2 launch list</h2>
+  <p class="muted">Emails jo v2 waitlist page se aaye hain. v2 launch
+  par in sab ko email bheja jayega (neeche Export CSV se list nikalein).</p>
+  <p><strong>Total: <span id="waitlist-count">—</span></strong></p>
+  <input id="waitlist-search" type="search" placeholder="Search by email…" aria-label="Search waitlist by email">
+  <div class="table-wrap">
+    <table id="waitlist-table">
+      <thead>
+        <tr>
+          <th>Email</th><th>Date</th><th>Source</th>
+        </tr>
+      </thead>
+      <tbody id="waitlist-tbody"></tbody>
+    </table>
+  </div>
+  <p id="waitlist-empty" class="muted hidden">No waitlist signups yet.</p>
+  <p id="waitlist-error" class="error-text hidden" role="alert"></p>
+  <button id="waitlist-export-btn" type="button">Export CSV</button>
+</section>
+
+      <p id="toast" class="toast hidden" role="status" aria-live="polite"></p>
+    </div>
+  </main>
+
+  <!-- Shown once, right after an approval: the generated code + email. -->
+  <div id="approve-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="approve-modal-title">
+    <div class="modal-box">
+      <h2 id="approve-modal-title">Code issued — copy it now</h2>
+      <p>This is the <strong>only</strong> time the plain code is shown.
+      Send it to the buyer, then close this window.</p>
+      <p class="code-big"><code id="approve-code"></code></p>
+      <button id="approve-copy-btn" type="button">Copy code</button>
+      <h3>Email text (ready to send)</h3>
+      <textarea id="approve-email-text" rows="9" readonly></textarea>
+      <p><a id="approve-mailto" href="#">Open in email app</a></p>
+      <button id="approve-close-btn" type="button">Close</button>
+    </div>
+  </div>
+
+  <footer class="muted">
+    OfficerPath AI admin panel — anon key only. All admin checks are enforced
+    by Row Level Security + the <code>is_admin</code> flag; this page also
+    refuses to render data for non-admins.
+  </footer>
+</body>
+</html>

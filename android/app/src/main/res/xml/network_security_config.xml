@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- v1.2: cleartext traffic OFF. The app talks only to HTTPS endpoints
+     (Gemini API, Dawn/BBC/Guardian RSS feeds). An HTTP URL anywhere in
+     the app is a bug — see the security test that greps for it. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

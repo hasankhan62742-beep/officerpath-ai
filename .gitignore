@@ -1,0 +1,30 @@
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+*.apk
+*.aab
+*.ipa
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+local.properties
+
+# VS Code
+.vscode/
+
+# macOS / Windows
+.DS_Store
+Thumbs.db
+
+# Secrets — NEVER commit keys. v2 AI/Supabase keys go in
+# --dart-define at build time, never in this repo.
+*.keystore
+*.jks
+key.properties
+.env

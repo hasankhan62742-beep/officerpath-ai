@@ -1,0 +1,3 @@
+# Admin panel secrets — never commit the real config.
+# config.js holds the Supabase URL + anon key for the deployed panel.
+config.js
