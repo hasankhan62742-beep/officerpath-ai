@@ -12,6 +12,7 @@ import 'docx_text_extractor.dart';
 import 'gemini_config.dart';
 import 'image_preprocess.dart';
 import 'mcq_parser.dart';
+import 'ocr_deskew.dart';
 import 'pdf_text_extractor.dart';
 import 'urdu_ocr.dart';
 
@@ -898,7 +899,14 @@ class PdfImportService {
               }
             }
           }
-          final table = reconstructTableText(elements);
+          // Tilted photo (21 Nov 2026, IBES table photo): de-tilt
+          // the word geometry BEFORE rows are rebuilt, so a slanted
+          // table's words land in their own rows. A straight page
+          // estimates 0° and is passed through untouched.
+          final skew = estimateSkewDegrees(elements);
+          final table = reconstructTableText(
+            skew == 0 ? elements : deskewElements(elements, skew),
+          );
           if (table != null) return table;
           return columnSplitOcrText(recognized.text, lines);
         } catch (_) {

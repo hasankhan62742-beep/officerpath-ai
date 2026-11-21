@@ -2,7 +2,7 @@ name: officerpath_ai
 description: "OfficerPath AI — Apni book se officer tak ka rasta. Upload your own MCQ book or past papers, generate a timed test in the real commission pattern (PPSC / PMS / CSS / FPSC / KPPSC / BPSC / SPSC), attempt it, and track your evaluation."
 # Prevent accidental publishing to pub.dev
 publish_to: "none"
-version: 2.0.4+5400
+version: 2.0.5+5500
 
 environment:
   sdk: ">=3.7.0 <4.0.0"

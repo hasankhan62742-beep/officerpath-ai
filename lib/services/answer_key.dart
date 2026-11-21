@@ -390,6 +390,31 @@ String? monthHeadingLabel(String line) {
   return '$full $year';
 }
 
+/// A chapter heading: "Chapter 1", "Chapter 2" — the whole line
+/// must be (just) the heading, so a stem that merely mentions a
+/// chapter ("Which chapter is this?") is never one. Chapter-wise
+/// keys restart numbering after each chapter, so each chapter is
+/// its own key-join segment (21 Nov 2026, F20) — exactly like a
+/// paper/month heading, but a chapter is NOT a paper-kind label
+/// (see [_isPaperKindLabel]): a book grouped by chapter is still
+/// one paper, so its per-chapter bare keys stay HIGH CONFIDENCE
+/// instead of NEEDS REVIEW. A titled heading ("Chapter 1: Grammar")
+/// is not split — same conservatism as paper headings.
+final _chapterHeadingRe = RegExp(
+  r'^\s*chapter\s+\d+\s*[:\-–—]?\s*$',
+  caseSensitive: false,
+);
+
+/// "Chapter 1" segment label for a chapter-heading line, or null.
+String? _chapterHeadingLabel(String line) {
+  final t = stripBoldMarkers(line).trim();
+  final m = _chapterHeadingRe.firstMatch(t);
+  if (m == null) return null;
+  final n = RegExp(r'\d+').firstMatch(t)?.group(0);
+  if (n == null) return null;
+  return 'Chapter $n';
+}
+
 /// Start of one key entry inside a key token stream:
 /// "1. ", "1-C ", "1) ", "Q1: ", "61. (C) …". After the separator
 /// there must be whitespace, an answer letter, an opening paren, or
@@ -529,7 +554,20 @@ bool _isKeyOnlyLine(String line) {
     r'^(?:(?:Q\s*)?(?:\d+|[0-9IiLlOoSsBbZz$§]{1,3})\s*[\.\)\:\-]\s*(?:[A-Da-d]|\?)(?=\s|$)\s*)+$',
     caseSensitive: false,
   ).hasMatch(t)) {
-    return false;
+    // Separator-less rows ("1 B  2 A  3 D", "1(B) 2(A)" — 21 Nov
+    // 2026): the whole line must be >= 3 such pairs, contiguously,
+    // so a stray "5 A" is never a key line. A pair inside a longer
+    // line ("Answers 1 B 2 A 3 D") does not count — the line must be
+    // nothing but the pairs.
+    final barePairs = _bareKeyEntryRe.allMatches(t).toList();
+    if (barePairs.length < 3) return false;
+    var contiguous = barePairs.first.start == 0;
+    for (var i = 1; i < barePairs.length && contiguous; i++) {
+      contiguous = barePairs[i].start == barePairs[i - 1].end;
+    }
+    contiguous = contiguous && barePairs.last.end == t.length;
+    if (!contiguous) return false;
+    return barePairs.every((m) => decodeOcrNumber(m.group(1)!) != null);
   }
   return RegExp(
     r'(?:Q\s*)?(\d+|[0-9IiLlOoSsBbZz$§]{1,3})\s*[\.\)\:\-]',
@@ -574,7 +612,19 @@ bool isAnswerKeyHeading(String line) {
   ).firstMatch(core);
   if (wrapped != null) core = wrapped.group(1)!;
   // Trailing "(…)" label: "Answer Key (January 2026)" → "Answer Key".
-  core = core.replaceFirst(RegExp(r'\s*\([^)]*\)\s*$'), '').trim();
+  // A single option letter in parens is NOT a label — it is the
+  // ANSWER ("Answer: (B)"): stripping it turns the answer line into
+  // a key heading, the questions after it are swallowed as key
+  // entries, and the whole document is rejected (F10, 21 Nov 2026).
+  // Only strip the parens when their content is not a bare answer
+  // token (one letter A–E or digit 1–4).
+  final trailingParen = RegExp(r'\s*\(([^)]*)\)\s*$').firstMatch(core);
+  if (trailingParen != null &&
+      !RegExp(
+        r'^[A-Ea-e1-4]$',
+      ).hasMatch(trailingParen.group(1)!.trim())) {
+    core = core.substring(0, trailingParen.start).trim();
+  }
   // Strip a leading paper reference: "Paper 1 Answer Key".
   core = core.replaceFirst(
     RegExp(
@@ -592,6 +642,88 @@ bool isAnswerKeyHeading(String line) {
     '',
   );
   return _keyCoreRe.hasMatch(core);
+}
+
+/// The remainder of a line whose START is a key heading but which
+/// carries more text after it — the shape an OCR line-merge produces
+/// ("ANSWER KEY: 1. (B) Broke out", "ANSWER KEY: English Grammar").
+/// [isAnswerKeyHeading] requires the WHOLE line to be the heading, so
+/// a merged line opens no section and the key vanishes (owner's phone,
+/// PPSC-66, v2.0.4, 21:15 run 20 Nov 2026: the Save dialog showed the
+/// green "no answers attached" notice although the key is on the
+/// page; the 21:38 run detected the key, so the merge is a
+/// run-varying ML Kit segmentation effect, not a constant). This
+/// returns the remainder, or null when the line is not a merged
+/// heading. The remainder must itself look like key content — a
+/// key-entry start, or a short heading-like fragment — so a prose line
+/// that merely begins with "Answers …" ("Answers to the following
+/// questions are …") never opens a key section. The caller opens the
+/// section and feeds the remainder back as the section's first
+/// content line; nothing is dropped.
+String? keyHeadingRemainder(String line) {
+  var core = stripBoldMarkers(line)
+      .replaceAll('✓', '')
+      .replaceAll('✔', '')
+      .trim();
+  // A leading paper reference is stripped first, as in
+  // [isAnswerKeyHeading]: "Paper 1 Answer Key: 1. C".
+  core = core.replaceFirst(
+    RegExp(
+      '^$_paperKindRe\\s*(?:no\\.?|number|#)?\\s*$_paperIdRe\\s*[-–—:]?\\s*',
+      caseSensitive: false,
+    ),
+    '',
+  );
+  final m = RegExp(
+    // NOTE (20 Nov 2026): the plural is REQUIRED in the bare
+    // "Answers" / "Correct Answers" alternatives. The singular
+    // "Answer:" is the per-question answer line ("Answer: Option C",
+    // "Answer: C") — matching it would open a spurious key section
+    // at every answered question and swallow the questions after it
+    // (17 suite failures: F1 40→2, Examveda, Pace, MPT, Final
+    // Answer). A merged heading always carries the key word ("Answer
+    // Key"), the sheet word, or the plural ("Answers", "Correct
+    // Answers"); a lone singular "Answer:" never opens a section.
+    r'^(answer\s*keys?|answers|answer\s*sheet|correct\s*answers|keys?)\s*[:\-–—]?\s*',
+    caseSensitive: false,
+  ).firstMatch(core);
+  if (m == null) return null;
+  final rest = core.substring(m.end).trim();
+  if (rest.isEmpty) return null;
+  // Key-entry start: "1. (B) …", "21.(B) …", "Q1: C".
+  final entryStart = _keyEntryStartRe.firstMatch(rest);
+  if (entryStart != null && entryStart.start == 0) return rest;
+  // Short heading-like fragment: a subhead ("English Grammar").
+  if (_looksLikeKeySubhead(rest)) return rest;
+  return null;
+}
+
+/// Short (≥3 chars, ≤45 chars), title-cased, no trailing sentence
+/// punctuation — the shape of a key-section subhead ("English
+/// Grammar", "Grammar and Vocabulary", "Miscellaneous"). Mirrors the
+/// heading guard in urdu_ocr.dart ([_looksLikeHeading]) without
+/// importing it. A single letter ("B") is not a subhead.
+bool _looksLikeKeySubhead(String text) {
+  final trimmed = text.trim();
+  if (trimmed.length < 3 || trimmed.length > 45) return false;
+  // A bare answer token in parens ("(B)") is an answer, not a
+  // subhead: "Answer: (B)" must not open a key section via the
+  // merged-heading path (F10, 21 Nov 2026 — same misread as the
+  // trailing-label strip in [isAnswerKeyHeading]).
+  if (RegExp(r'^\(?[A-Ea-e1-4]\)?$').hasMatch(trimmed)) return false;
+  if (trimmed.endsWith('.') ||
+      trimmed.endsWith('?') ||
+      trimmed.endsWith('!')) {
+    return false;
+  }
+  const small = {'of', 'and', 'the', 'a', 'an', 'in', 'on'};
+  for (final word in trimmed.split(RegExp(r'\s+'))) {
+    final letters = word.replaceAll(RegExp(r'[^A-Za-z]'), '');
+    if (letters.isEmpty) continue;
+    if (small.contains(letters.toLowerCase())) continue;
+    if (letters[0] != letters[0].toUpperCase()) return false;
+  }
+  return true;
 }
 
 /// True when [line] is a one-line question: a complete (a)–(d) /
@@ -667,6 +799,23 @@ String _normaliseBareQEntries(String s) {
   );
 }
 
+/// A separator-less key entry inside a key token stream: "1 B" or
+/// "1(B)" — the number followed by whitespace + a bare letter, or
+/// directly by "(letter)". The letter must be followed by
+/// whitespace, a comma/semicolon, or end of blob — so "1 Bravo" (a
+/// text answer) is never read as letter B. The number slot is
+/// [ocrNumberTokenPattern], so an OCR-misread entry number is
+/// decoded by the caller via [decodeOcrNumber]. Group 1 is the
+/// number, group 2 the paren letter, group 3 the bare letter.
+/// See [parseKeyEntries] for the >= 3 guard that keeps a stray
+/// "5 A" from ever becoming a key.
+final _bareKeyEntryRe = RegExp(
+  r'(?:^|\s)(?:Q\s*)?(' +
+      ocrNumberTokenPattern +
+      r')\s*(?:\(\s*([A-Ea-e])\s*\)|([A-Ea-e])(?=[\s,;]|$))',
+  caseSensitive: false,
+);
+
 /// Parses key entries out of one key section's text (lines joined into
 /// a single token stream). Returns number → raw answer token; the first
 /// entry wins when a number is repeated (e.g. a key printed twice).
@@ -679,6 +828,12 @@ String _normaliseBareQEntries(String s) {
 /// bold key table prints "57. A" — the marker sits between the
 /// separator and the letter and would otherwise break the entry-start
 /// lookahead.
+///
+/// Separator-less rows ("1 B  2 A  3 D", "1(B) 2(A)" — 21 Nov 2026)
+/// are a second pass: they only count when the blob holds >= 3 of
+/// them, so a stray "5 A" is never a key, and a pair that sits
+/// INSIDE a separator entry's value ("1. (B) 2 Brothers" — the "2 B"
+/// is answer text, not an entry) is ignored.
 Map<int, String> parseKeyEntries(String blob) {
   blob = stripBoldMarkers(blob);
   // "Q1 C" (no separator) is a key entry too — rewrite it first, so
@@ -701,6 +856,32 @@ Map<int, String> parseKeyEntries(String blob) {
         .trim();
     if (value.isEmpty) continue;
     entries.putIfAbsent(number, () => value);
+  }
+  // Separator-less second pass (see above): only top-level pairs
+  // (never inside a separator entry's value span), and only when
+  // there are >= 3 of them in the whole blob.
+  final bare = _bareKeyEntryRe.allMatches(blob).toList();
+  final topLevel = <RegExpMatch>[];
+  for (final m in bare) {
+    var insideValue = false;
+    for (var i = 0; i < starts.length; i++) {
+      final valueStart = starts[i].end;
+      final valueEnd =
+          i + 1 < starts.length ? starts[i + 1].start : blob.length;
+      if (m.start >= valueStart && m.start < valueEnd) {
+        insideValue = true;
+        break;
+      }
+    }
+    if (!insideValue) topLevel.add(m);
+  }
+  if (topLevel.length >= 3) {
+    for (final m in topLevel) {
+      final number = decodeOcrNumber(m.group(1)!);
+      if (number == null) continue;
+      final letter = (m.group(2) ?? m.group(3)!).toUpperCase();
+      entries.putIfAbsent(number, () => letter);
+    }
   }
   return entries;
 }
@@ -791,6 +972,25 @@ SegmentedText segmentLines(List<SegmentedLine> lines) {
       keyEntries.putIfAbsent(keyPaper, () => <int, String>{});
       continue;
     }
+    // Merged heading line (OCR line-merge, 20 Nov 2026): the heading
+    // and the first key content share one line ("ANSWER KEY:
+    // 1. (B) Broke out"). Open the section and feed the remainder
+    // back as its first content line — never drop it. The explicit
+    // paper rule above applies unchanged: a merged heading that
+    // names a paper is explicit for that paper only.
+    final keyRemainder = keyHeadingRemainder(line);
+    if (keyRemainder != null) {
+      flushKey();
+      inKey = true;
+      inExplanation = false;
+      final explicitPaper = _paperRefIn(line);
+      keyPaper = explicitPaper ?? lastQuestionPaper;
+      if (explicitPaper != null) explicitKeyPapers.add(explicitPaper);
+      keySectionsFound++;
+      keyEntries.putIfAbsent(keyPaper, () => <int, String>{});
+      keyBuffer.add(keyRemainder);
+      continue;
+    }
     final paperLabel = _paperHeadingLabel(line);
     if (paperLabel != null) {
       flushKey();
@@ -811,6 +1011,19 @@ SegmentedText segmentLines(List<SegmentedLine> lines) {
       inKey = false;
       inExplanation = false;
       currentPaper = monthLabel;
+      continue;
+    }
+    // Chapter heading ("Chapter 1"): a new key-join segment, like a
+    // paper/month heading — chapter-wise keys restart numbering, so
+    // each chapter is its own segment (21 Nov 2026, F20). The
+    // whole-line regex already excludes stems that merely mention a
+    // chapter, and a chapter heading is never a question/option line.
+    final chapterLabel = _chapterHeadingLabel(line);
+    if (chapterLabel != null) {
+      flushKey();
+      inKey = false;
+      inExplanation = false;
+      currentPaper = chapterLabel;
       continue;
     }
     if (inKey) {
@@ -1216,6 +1429,66 @@ Map<String, KeyMatchDecision> keyMatchDecisions(
     );
   }
   return decisions;
+}
+
+/// Adopts an explicit key whose named paper has NO questions, for
+/// the document's single unlabelled paper — ONLY when provably safe
+/// (21 Nov 2026, phone failure: the "MODEL PAPER 66" heading was
+/// not read by OCR, every question landed under the default paper
+/// and all 100 key entries came back "no matching question"):
+/// * exactly ONE explicit key exists in the document;
+/// * the key's named paper has no question lines at all;
+/// * every question line is in ONE segment, the default paper (no
+///   paper headings were read anywhere);
+/// * question numbers are unique (no number appears twice);
+/// * >= 80% of the key's entry numbers appear among the questions.
+/// The entries are MOVED into the questions' segment, so the
+/// segment-local join applies them unchanged. An adopted entry
+/// overwrites an existing bare-key entry for the same number in the
+/// target segment: the explicit key carries verified identity, the
+/// bare key is positional only. Returns the adopted labels with
+/// their number overlap (0..1), or empty when nothing is safe to
+/// adopt — never guessed. Two papers merged with no headings are
+/// refused by the uniqueness check (their numbers repeat); a key
+/// covering a different paper's numbers is refused by the 80%
+/// check. This mutates [segmented.keyEntries] (moves the entries);
+/// the decision map is computed before the call, so it is untouched.
+Map<String, double> adoptOrphanExplicitKeys(SegmentedText segmented) {
+  final adopted = <String, double>{};
+  if (segmented.explicitKeyPapers.length != 1) return adopted;
+  final label = segmented.explicitKeyPapers.single;
+  final entries = segmented.keyEntries[label];
+  if (entries == null || entries.isEmpty) return adopted;
+  final questionPapers = <String>{};
+  final seenNumbers = <int>{};
+  var unique = true;
+  for (final l in segmented.questionLines) {
+    questionPapers.add(l.paper);
+    final n = _questionLineNumber(l.text);
+    if (n != null && !seenNumbers.add(n)) unique = false;
+  }
+  // The key's named paper must have no questions of its own —
+  // otherwise the key already has somewhere to go — and every
+  // question must sit in the single default segment.
+  if (questionPapers.contains(label)) return adopted;
+  if (questionPapers.length != 1 ||
+      !questionPapers.contains(defaultPaperLabel)) {
+    return adopted;
+  }
+  if (!unique) return adopted;
+  final matched = entries.keys.where(seenNumbers.contains).length;
+  final overlap = matched / entries.length;
+  if (overlap < 0.8) return adopted;
+  final target = segmented.keyEntries.putIfAbsent(
+    defaultPaperLabel,
+    () => <int, String>{},
+  );
+  for (final e in entries.entries) {
+    target[e.key] = e.value;
+  }
+  segmented.keyEntries.remove(label);
+  adopted[label] = overlap;
+  return adopted;
 }
 
 /// Question number of a question-start line ("Q12. …" → 12,

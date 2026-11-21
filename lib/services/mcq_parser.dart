@@ -2190,6 +2190,14 @@ ParseResult _parseImpl(
       segmented.keyEntries.remove(e.key);
     }
   }
+  // Unlabelled-paper adoption (21 Nov 2026): an explicit key whose
+  // named paper has no questions (its heading was not read by OCR)
+  // is adopted for the document's single unlabelled paper ONLY when
+  // provably safe — see [adoptOrphanExplicitKeys]. The entries move
+  // into the questions' segment, so the segment-local join below
+  // applies them unchanged; the decision map above is untouched
+  // (the key's identity was verified by its heading).
+  final adoptedKeyLabels = adoptOrphanExplicitKeys(segmented);
   // 5→4 normalisation (Examveda), number gaps (MPT), noise filter
   // (Examveda / organisation), fact cards (organisation).
   var fiveOptionNormalised = 0;
@@ -3870,12 +3878,25 @@ ParseResult _parseImpl(
     for (final l in segmented.questionLines) l.paper,
   };
   for (final paper in segmented.explicitKeyPapers) {
-    if (!papersWithQuestions.contains(paper)) {
+    // Adopted orphan keys were applied (see above) — they are not
+    // "no questions" keys, so the line below must not fire for them.
+    if (!papersWithQuestions.contains(paper) &&
+        !adoptedKeyLabels.containsKey(paper)) {
       keyPaperReport.add(
         "Key '$paper' mili, lekin is PDF mein $paper ke sawal nahi — "
         'key nahi lagayi.',
       );
     }
+  }
+  // Adopted orphan keys (see above): the preview must say the key
+  // was adopted for the unlabelled questions, and why — it is a
+  // safety-gated adoption, not a verified paper match.
+  for (final e in adoptedKeyLabels.entries) {
+    keyPaperReport.add(
+      "Key '${e.key}' ka heading nahi parha gaya — key unhi sawalon "
+      'par lagayi gayi (aik paper, unique numbers, '
+      '${(e.value * 100).round()}% overlap).',
+    );
   }
 
   return ParseResult(

@@ -479,6 +479,85 @@ void main() {
       isTrue,
     );
   });
+
+  test('merged key heading line opens the section (OCR line-merge)', () {
+    // 20 Nov 2026, PHONE_MLKIT_REAL: the phone's ML Kit read merges
+    // the key heading with the next line, so isAnswerKeyHeading
+    // (whole-line match) fails, no section opens, and the Save dialog
+    // says "no answers attached" although the key is on the page.
+    // The heading words and the first entry are verbatim from the
+    // real Paper 66 key (Tesseract read of p6: "ANSWER KEY:" then
+    // "1. (B) Broke out"); only the line break between them is the
+    // merge. Before the fix this parses 0 key sections and the entry
+    // never applies.
+    const text = 'Q1. Capital of Pakistan?\n'
+        'A) Lahore\nB) Karachi\nC) Islamabad\nD) Quetta\n'
+        'Q2. Capital of France?\n'
+        'A) London\nB) Paris\nC) Rome\nD) Berlin\n'
+        'ANSWER KEY: 1. C\n'
+        '2. B\n';
+    final r = parseMcqs(text, sourceId: _src, sourceLabel: _label);
+    expect(r.keySectionsFound, 1);
+    expect(r.keyEntriesApplied, 2);
+    expect(r.questionsMissingAnswers, isEmpty);
+    expect(
+      r.questions.map((q) => q.correctIndex).toList(),
+      [2, 1],
+    );
+  });
+
+  test('merged key heading with a subhead opens the section', () {
+    // Same merge, but the heading merged with its subhead instead
+    // of the first entry ("ANSWER KEY: English Grammar" — the real
+    // Paper 66 subhead, verbatim from the Tesseract p6 read). The
+    // subhead must reach the section buffer, not be dropped, and the
+    // entries after it must still apply.
+    const text = 'Q1. Capital of Pakistan?\n'
+        'A) Lahore\nB) Karachi\nC) Islamabad\nD) Quetta\n'
+        'Q2. Capital of France?\n'
+        'A) London\nB) Paris\nC) Rome\nD) Berlin\n'
+        'ANSWER KEY: English Grammar\n'
+        '1. C\n'
+        '2. B\n';
+    final r = parseMcqs(text, sourceId: _src, sourceLabel: _label);
+    expect(r.keySectionsFound, 1);
+    expect(r.keyEntriesApplied, 2);
+    expect(r.questionsMissingAnswers, isEmpty);
+  });
+
+  test('prose starting with "Answers" does not open a key section', () {
+    // Guard for keyHeadingRemainder: a prose line that merely begins
+    // with the word "Answers" must never be treated as a merged
+    // heading — the remainder is neither a key entry nor a
+    // heading-like fragment.
+    const text = 'Q1. Capital of Pakistan?\n'
+        'A) Lahore\nB) Karachi\nC) Islamabad\nD) Quetta\n'
+        'Answers to the following questions are given below.\n'
+        'Q2. Capital of France?\n'
+        'A) London\nB) Paris\nC) Rome\nD) Berlin\n';
+    final r = parseMcqs(text, sourceId: _src, sourceLabel: _label);
+    expect(r.keySectionsFound, 0);
+    expect(r.keyEntriesApplied, 0);
+  });
+
+  test('per-question "Answer: Option C" line never opens a key section', () {
+    // Regression (20 Nov 2026): keyHeadingRemainder's first version
+    // matched the bare word "Answer", so a standard answer line
+    // ("Answer: Option C" / "Answer: C") opened a spurious key
+    // section and swallowed every question after it — 17 suite
+    // failures, incl. F1 40→2. The singular "Answer:" is an answer
+    // line, never a heading.
+    const text = 'Q1. Capital of Pakistan?\n'
+        'A) Lahore\nB) Karachi\nC) Islamabad\nD) Quetta\n'
+        'Answer: Option C\n'
+        'Q2. Capital of France?\n'
+        'A) London\nB) Paris\nC) Rome\nD) Berlin\n'
+        'Answer: Option B\n';
+    final r = parseMcqs(text, sourceId: _src, sourceLabel: _label);
+    expect(r.keySectionsFound, 0);
+    expect(r.keyEntriesApplied, 0);
+    expect(r.questions.length, 2);
+  });
 }
 
 /// Replica of the user's real book shape (from the v1.1 diagnosis):

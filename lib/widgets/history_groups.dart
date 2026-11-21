@@ -83,7 +83,7 @@ List<AttemptGroup> groupAttemptsByDate(
     if (day == today) return 'Today';
     if (day == yesterday) return 'Yesterday';
     if (!day.isBefore(weekStart)) return 'This Week';
-    return DateFormat('dd MMM yyyy').format(day);
+    return DateFormat('d MMM yyyy').format(day);
   }
 
   // Newest first overall, so each bucket's first item is its latest.
